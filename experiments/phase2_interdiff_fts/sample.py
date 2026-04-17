@@ -32,6 +32,16 @@ def parse_args():
                     help="source panel for borrowing regime/mkt/sector sequences")
     ap.add_argument("--sectors-npz", default="data/csi300_sectors.npz",
                     help="sector labels sidecar; used if ckpt has sector_cond=True")
+    ap.add_argument("--sampler", choices=["ddpm", "ddim"], default="ddpm",
+                    help="ddpm = full T-step ancestral sampling; "
+                         "ddim = deterministic fast sampler (10-25x faster)")
+    ap.add_argument("--ddim-steps", type=int, default=50,
+                    help="number of DDIM steps when --sampler=ddim")
+    ap.add_argument("--ddim-eta", type=float, default=0.0,
+                    help="DDIM stochasticity; 0 = deterministic, 1 = DDPM-like")
+    ap.add_argument("--guidance", type=float, default=1.0,
+                    help="classifier-free guidance scale; 1.0 = no guidance, "
+                         ">1 amplifies conditioning (typical 1.5-7.5)")
     return ap.parse_args()
 
 
@@ -51,7 +61,15 @@ def main():
 
     use_mkt_cond = ck.get("mkt_cond", False)
     use_sector_cond = ck.get("sector_cond", False)
-    print(f"[sample] mkt_cond={use_mkt_cond}  sector_cond={use_sector_cond}")
+    cfg_drop_train = ck.get("cfg_drop", 0.0)
+    print(f"[sample] mkt_cond={use_mkt_cond}  sector_cond={use_sector_cond}  "
+          f"cfg_drop(train)={cfg_drop_train}")
+    print(f"[sample] sampler={args.sampler}  "
+          f"{'steps=' + str(args.ddim_steps) + ' eta=' + str(args.ddim_eta) if args.sampler == 'ddim' else 'T=' + str(ck['args']['T'])}  "
+          f"guidance={args.guidance}")
+    if args.guidance != 1.0 and cfg_drop_train == 0.0:
+        print("[sample] WARNING: guidance != 1 but ckpt was not trained with cfg_drop>0; "
+              "unconditional branch is not well-learned, results may be unstable.")
 
     model = InterDenoiser(
         n_channels=4,
@@ -126,8 +144,19 @@ def main():
             if sec_list and use_sector_cond:
                 sector_batch = torch.stack(sec_list, dim=0).to(device)
 
-        x = diff.sample(model, shape=(args.batch, K, L, C),
-                        cond=cond_batch, mkt_cond=mkt_batch, sector_cond=sector_batch)
+        if args.sampler == "ddim":
+            x = diff.sample_ddim(
+                model, shape=(args.batch, K, L, C),
+                steps=args.ddim_steps, eta=args.ddim_eta,
+                cond=cond_batch, mkt_cond=mkt_batch, sector_cond=sector_batch,
+                guidance=args.guidance,
+            )
+        else:
+            x = diff.sample(
+                model, shape=(args.batch, K, L, C),
+                cond=cond_batch, mkt_cond=mkt_batch, sector_cond=sector_batch,
+                guidance=args.guidance,
+            )
         all_samples.append(x.cpu().numpy())
         print(f"[sample] batch {bi+1}/{args.n_batches}")
 

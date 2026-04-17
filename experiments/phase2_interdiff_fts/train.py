@@ -104,6 +104,13 @@ def parse_args():
     ap.add_argument("--sectors-npz", default=None,
                     help="path to sector labels sidecar npz (e.g. data/csi300_sectors.npz); "
                          "enables per-stock sector factor conditioning")
+    ap.add_argument("--bf16", action="store_true",
+                    help="train with bf16 mixed precision (forward/backward in bf16, "
+                         "optimizer state in fp32); requires Ampere+ GPU")
+    ap.add_argument("--cfg-drop", type=float, default=0.0,
+                    help="probability of dropping all conditioning per batch during training, "
+                         "enabling classifier-free guidance at inference; 0.0 = disabled, "
+                         "0.1 is the standard CFG drop rate")
     return ap.parse_args()
 
 
@@ -214,11 +221,13 @@ def main():
             it_pre = iter(loader)
             pb = _split_batch(next(it_pre))
             torch.cuda.reset_peak_memory_stats()
-            loss_pre = diff.training_loss(
-                model, pb["x"],
-                cond=pb["regime"], mkt_cond=pb["mkt"], sector_cond=pb["sector"],
-                aux_market_weight=args.aux_market_weight,
-            )
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=args.bf16):
+                loss_pre = diff.training_loss(
+                    model, pb["x"],
+                    cond=pb["regime"], mkt_cond=pb["mkt"], sector_cond=pb["sector"],
+                    aux_market_weight=args.aux_market_weight,
+                    cfg_drop=args.cfg_drop,
+                )
             loss_pre.backward()
             opt.zero_grad(set_to_none=True)
             torch.cuda.synchronize()
@@ -253,11 +262,13 @@ def main():
             batch = next(it)
         bd = _split_batch(batch)
 
-        loss = diff.training_loss(
-            model, bd["x"],
-            cond=bd["regime"], mkt_cond=bd["mkt"], sector_cond=bd["sector"],
-            aux_market_weight=args.aux_market_weight,
-        )
+        with torch.autocast(device_type=device, dtype=torch.bfloat16, enabled=(args.bf16 and device == "cuda")):
+            loss = diff.training_loss(
+                model, bd["x"],
+                cond=bd["regime"], mkt_cond=bd["mkt"], sector_cond=bd["sector"],
+                aux_market_weight=args.aux_market_weight,
+                cfg_drop=args.cfg_drop,
+            )
         opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -306,6 +317,8 @@ def main():
                 "ds_info": ds.info(),
                 "mkt_cond": True,
                 "sector_cond": ds.sector_labels is not None,
+                "cfg_drop": args.cfg_drop,
+                "bf16": args.bf16,
             }
             if use_regimes:
                 save_obj["regime_spec"] = ds.regime_spec.to_dict()

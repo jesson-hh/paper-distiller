@@ -57,11 +57,21 @@ class GaussianDiffusion:
         mkt_cond: torch.Tensor | None = None,
         sector_cond: torch.Tensor | None = None,
         aux_market_weight: float = 0.0,
+        cfg_drop: float = 0.0,
     ) -> torch.Tensor:
         B = x0.shape[0]
         t = torch.randint(0, self.T, (B,), device=x0.device)
         noise = torch.randn_like(x0)
         xt = self.q_sample(x0, t, noise)
+
+        # Classifier-free guidance: drop all conditioning for the whole batch
+        # with probability cfg_drop so the model learns the unconditional
+        # distribution p(x) alongside p(x | cond).
+        if cfg_drop > 0.0 and torch.rand((), device=x0.device).item() < cfg_drop:
+            cond = None
+            mkt_cond = None
+            sector_cond = None
+
         eps = model(xt, t, cond=cond, mkt_cond=mkt_cond, sector_cond=sector_cond)
         base = F.mse_loss(eps, noise)
         if aux_market_weight <= 0.0:
@@ -74,6 +84,31 @@ class GaussianDiffusion:
         loss_res = F.mse_loss(res_pred, res_true)
         return loss_res + aux_market_weight * loss_mkt
 
+    def _predict_eps(
+        self,
+        model,
+        x: torch.Tensor,
+        t: torch.Tensor,
+        cond: torch.Tensor | None,
+        mkt_cond: torch.Tensor | None,
+        sector_cond: torch.Tensor | None,
+        guidance: float,
+    ) -> torch.Tensor:
+        """
+        One denoiser forward pass. If guidance != 1, run CFG: compute both
+        conditional and unconditional eps and extrapolate.
+
+            eps = eps_uncond + guidance * (eps_cond - eps_uncond)
+
+        guidance = 1.0 -> pure conditional (no extra cost)
+        guidance > 1.0 -> amplify conditioning (typical 1.5 to 7.5)
+        """
+        if guidance == 1.0 or (cond is None and mkt_cond is None and sector_cond is None):
+            return model(x, t, cond=cond, mkt_cond=mkt_cond, sector_cond=sector_cond)
+        eps_cond = model(x, t, cond=cond, mkt_cond=mkt_cond, sector_cond=sector_cond)
+        eps_uncond = model(x, t, cond=None, mkt_cond=None, sector_cond=None)
+        return eps_uncond + guidance * (eps_cond - eps_uncond)
+
     @torch.no_grad()
     def sample(
         self,
@@ -85,6 +120,7 @@ class GaussianDiffusion:
         cond: torch.Tensor | None = None,
         mkt_cond: torch.Tensor | None = None,
         sector_cond: torch.Tensor | None = None,
+        guidance: float = 1.0,
     ) -> torch.Tensor:
         x = torch.randn(shape, device=self.device)
         iters = range(self.T - 1, -1, -1)
@@ -96,7 +132,7 @@ class GaussianDiffusion:
                 pass
         for i in iters:
             t = torch.full((shape[0],), i, device=self.device, dtype=torch.long)
-            eps = model(x, t, cond=cond, mkt_cond=mkt_cond, sector_cond=sector_cond)
+            eps = self._predict_eps(model, x, t, cond, mkt_cond, sector_cond, guidance)
             beta = self.betas[i]
             alpha = self.alphas[i]
             ac = self.alpha_cum[i]
@@ -117,4 +153,70 @@ class GaussianDiffusion:
                 x = mean + torch.sqrt(var) * noise
             else:
                 x = x0_pred
+        return x
+
+    @torch.no_grad()
+    def sample_ddim(
+        self,
+        model,
+        shape,
+        steps: int = 50,
+        eta: float = 0.0,
+        progress: bool = False,
+        clip_denoised: bool = True,
+        clip_range: float = 5.0,
+        cond: torch.Tensor | None = None,
+        mkt_cond: torch.Tensor | None = None,
+        sector_cond: torch.Tensor | None = None,
+        guidance: float = 1.0,
+    ) -> torch.Tensor:
+        """
+        DDIM sampler (Song et al. 2021) — skip from T to 0 through a
+        `steps`-long subsequence. eta=0 is fully deterministic; eta=1
+        reduces to DDPM ancestral sampling on the selected subset.
+
+        Typical speedup: steps=50 vs T=500 → 10x faster sampling with
+        essentially identical FID in vision diffusion. For our financial
+        panel, DDIM is usually indistinguishable from the full ancestral
+        sampler on stylized-fact metrics.
+        """
+        # Pick a monotonically decreasing timestep subsequence
+        # 0 <= t_0 < t_1 < ... < t_{steps-1} < T
+        ts = torch.linspace(0, self.T - 1, steps, dtype=torch.long, device=self.device)
+        ts = torch.unique(ts)
+
+        x = torch.randn(shape, device=self.device)
+        iters = list(reversed(range(len(ts))))
+        if progress:
+            try:
+                from tqdm import tqdm
+                iters = tqdm(iters, desc="ddim")
+            except ImportError:
+                pass
+
+        for idx in iters:
+            i = int(ts[idx].item())
+            t = torch.full((shape[0],), i, device=self.device, dtype=torch.long)
+            eps = self._predict_eps(model, x, t, cond, mkt_cond, sector_cond, guidance)
+
+            ac = self.alpha_cum[i]
+            sa = torch.sqrt(ac)
+            sb = torch.sqrt(1.0 - ac)
+            x0_pred = (x - sb * eps) / sa
+            if clip_denoised:
+                x0_pred = x0_pred.clamp(-clip_range, clip_range)
+
+            if idx == 0:
+                # Final step: jump to x0
+                x = x0_pred
+            else:
+                i_prev = int(ts[idx - 1].item())
+                ac_prev = self.alpha_cum[i_prev]
+                sigma = eta * torch.sqrt(
+                    (1 - ac_prev) / (1 - ac) * (1 - ac / ac_prev)
+                )
+                # Direction pointing to x_t (deterministic component)
+                dir_xt = torch.sqrt(torch.clamp(1.0 - ac_prev - sigma ** 2, min=0.0)) * eps
+                noise = torch.randn_like(x) if eta > 0 else torch.zeros_like(x)
+                x = torch.sqrt(ac_prev) * x0_pred + dir_xt + sigma * noise
         return x
