@@ -85,3 +85,36 @@ def test_slug_path_traversal_rejected(tmp_vault: Path, bad_slug: str):
     store = VaultStore(tmp_vault)
     with pytest.raises(ValueError, match="Invalid slug"):
         store.save_entry(title="x", category="articles", body="b", slug=bad_slug)
+
+
+def test_find_by_arxiv_id_hit(tmp_vault: Path):
+    """find_by_arxiv_id returns the Entry whose refs contains the matching arxiv: ref."""
+    store = VaultStore(tmp_vault)
+    store.save_entry(
+        title="CoFinDiff",
+        category="articles",
+        body="x",
+        refs=["arxiv:2503.04164"],
+        slug="cofindiff-controllable",
+    )
+    found = store.find_by_arxiv_id("2503.04164")
+    assert found is not None
+    assert found.slug == "cofindiff-controllable"
+    assert "arxiv:2503.04164" in found.refs
+
+
+def test_find_by_arxiv_id_miss(tmp_vault: Path):
+    """find_by_arxiv_id returns None when no article references the given arxiv id."""
+    store = VaultStore(tmp_vault)
+    store.save_entry(title="X", category="articles", body="x",
+                     refs=["arxiv:9999.99999"])
+    assert store.find_by_arxiv_id("0000.00000") is None
+
+
+def test_find_by_arxiv_id_only_scans_articles(tmp_vault: Path):
+    """Non-articles categories (e.g. surveys with arxiv refs) must not match — dedup
+    scope is paper notes only."""
+    store = VaultStore(tmp_vault)
+    store.save_entry(title="A survey", category="surveys", body="x",
+                     refs=["arxiv:2503.04164"])
+    assert store.find_by_arxiv_id("2503.04164") is None

@@ -212,6 +212,38 @@ class VaultStore:
     def slug_exists(self, category: str, slug: str) -> bool:
         return self._entry_path(category, slug).exists()
 
+    def find_by_arxiv_id(self, arxiv_id: str) -> Entry | None:
+        """Find an article whose `refs` frontmatter contains `arxiv:<arxiv_id>`.
+
+        Returns the first matching Entry, or None if no match.
+
+        Only scans the `articles/` subdirectory — other categories use different
+        ref conventions (e.g. `session:<slug>` for surveys) and would create
+        false-positive matches if scanned.
+        """
+        target_ref = f"arxiv:{arxiv_id}"
+        folder = self.root / "articles"
+        if not folder.exists():
+            return None
+        for f in folder.glob("*.md"):
+            try:
+                meta, body = parse_frontmatter(f.read_text(encoding="utf-8"))
+                if target_ref in (meta.get("refs") or []):
+                    return Entry(
+                        slug=meta.get("slug", f.stem),
+                        category=meta.get("category", "articles"),
+                        title=meta.get("title", f.stem),
+                        tags=meta.get("tags") or [],
+                        refs=meta.get("refs") or [],
+                        links=meta.get("links") or [],
+                        created=meta.get("created", ""),
+                        updated=meta.get("updated", ""),
+                        body=body,
+                    )
+            except Exception:
+                continue
+        return None
+
     def list_entries(self, category: str | None = None) -> list:
         cats = [category] if category else list(CATEGORIES)
         for c in cats:
