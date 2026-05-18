@@ -31,6 +31,9 @@ class Config:
     pdf_timeout_sec: int
     min_papers_for_survey: int
 
+    source: str = "both"
+    ss_api_key: str | None = None
+
 
 def _require(name: str) -> str:
     v = os.getenv(name)
@@ -48,12 +51,15 @@ def load_config(
     force: bool = False,
     dry_run: bool = False,
     verbose: bool = False,
+    source: str = "both",
     model_override: str | None = None,
     provider_override: str | None = None,
 ) -> Config:
     """Build a Config from CLI args + env vars."""
     if not topic and not author:
         raise ValueError("Either topic or author must be provided.")
+    if source not in ("arxiv", "ss", "both"):
+        raise ValueError(f"source must be one of arxiv/ss/both (got {source!r})")
 
     return Config(
         vault_path=Path(vault_path),
@@ -64,6 +70,8 @@ def load_config(
         force=force,
         dry_run=dry_run,
         verbose=verbose,
+        source=source,
+        ss_api_key=os.getenv("PD_SS_API_KEY") or None,
         api_key=_require("PD_API_KEY"),
         base_url=_require("PD_BASE_URL"),
         model=model_override or _require("PD_MODEL"),

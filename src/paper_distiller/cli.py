@@ -23,6 +23,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--force", action="store_true", help="Overwrite existing article slugs.")
     p.add_argument("--dry-run", action="store_true", help="Plan only; no LLM, no writes.")
     p.add_argument("--verbose", "-v", action="store_true", help="Detailed logging.")
+    p.add_argument("--source", choices=["arxiv", "ss", "both"], default="both",
+                    help="Paper source(s) to search (default both).")
     p.add_argument("--model", help="Override PD_MODEL env var.")
     p.add_argument("--provider", help="Override PD_PROVIDER_NAME label.")
     return p
@@ -41,6 +43,7 @@ def main(argv: list | None = None) -> int:
             force=args.force,
             dry_run=args.dry_run,
             verbose=args.verbose,
+            source=args.source,
             model_override=args.model,
             provider_override=args.provider,
         )
