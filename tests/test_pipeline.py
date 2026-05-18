@@ -153,3 +153,47 @@ def test_pipeline_arxiv_id_dedup_skips_existing(tmp_path, mocker):
     assert line["distilled"] == 0
     # Critically: distill_article was never called — the skip happened upstream
     mock_distill.assert_not_called()
+
+
+def test_pipeline_force_overrides_arxiv_id_dedup(tmp_path, mocker):
+    """--force bypasses arxiv-id dedup — same behavior as for slug-based dedup."""
+    from paper_distiller.pipeline import run
+    from paper_distiller.vault.store import VaultStore
+    cfg = _config(tmp_path); cfg.vault_path.mkdir()
+    cfg.force = True  # the only difference from the dedup-skip test above
+    store = VaultStore(cfg.vault_path)
+    store.save_entry(
+        title="CoFinDiff (hand-written)",
+        category="articles",
+        body="pre-existing hand-written content",
+        refs=["arxiv:2501.00001"],
+        slug="cofindiff-handwritten",
+    )
+
+    mocker.patch("paper_distiller.pipeline.arxiv_search",
+                 return_value=[_paper(1)])
+    mocker.patch("paper_distiller.pipeline.rank",
+                 return_value=[_paper(1)])
+    mocker.patch("paper_distiller.pipeline.download_pdf",
+                 side_effect=lambda p, d, **k: Path(d) / f"{p.arxiv_id}.pdf")
+    mocker.patch("paper_distiller.pipeline.extract_text", return_value="x" * 1000)
+
+    def fake_distill(paper, full_text, wiki_index, llm):
+        return ArticleResult(
+            slug=f"forced-{paper.arxiv_id}",
+            title=f"Forced {paper.arxiv_id}",
+            body="b", tags=[], refs=[f"arxiv:{paper.arxiv_id}"],
+            depth="full-pdf",
+        )
+    mock_distill = mocker.patch("paper_distiller.pipeline.distill_article",
+                                 side_effect=fake_distill)
+    mocker.patch("paper_distiller.pipeline.compose_survey")
+    mocker.patch("paper_distiller.pipeline.LLMClient")
+
+    run(cfg)
+
+    log = (cfg.vault_path / ".paper_distiller" / "runs.jsonl").read_text()
+    line = json.loads(log.strip().split("\n")[-1])
+    assert line["skipped_dedup"] == 0
+    assert line["distilled"] == 1
+    mock_distill.assert_called_once()
