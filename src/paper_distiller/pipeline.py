@@ -154,6 +154,12 @@ def _fetch_with_fallback(paper: Paper, cfg: Config, tmpdir: Path) -> str:
         return ""
 
 
+# Public aliases for qa/ package (v0.5+). Old underscore names retained for
+# v0.3 internal callers; both refer to the same callable.
+gather_candidates = _gather_candidates
+fetch_with_fallback = _fetch_with_fallback
+
+
 def run(cfg: Config) -> dict:
     """Execute one L2 pipeline run. Returns the run summary dict."""
     start = time.time()
