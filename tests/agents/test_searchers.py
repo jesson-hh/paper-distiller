@@ -86,3 +86,43 @@ async def test_searchers_skip_when_source_excludes_them(mocker):
     out = await SemanticScholarSearcher().run(ctx)
     fake_search.assert_not_called()
     assert out == {"candidates_ss": []}
+
+
+@pytest.mark.asyncio
+async def test_arxiv_searcher_degrades_gracefully_on_429(mocker, capsys):
+    """HTTP 429 / network errors should NOT abort the DAG — return empty list + warn."""
+    mocker.patch(
+        "paper_distiller.agents.searchers.arxiv_search",
+        side_effect=RuntimeError("Client error '429 Too Many Requests' for url 'https://arxiv...'"),
+    )
+    ctx = _ctx_with_topic()
+    out = await ArxivSearcher().run(ctx)
+    assert out == {"candidates_arxiv": []}
+    captured = capsys.readouterr()
+    assert "degraded" in captured.err.lower()
+
+
+@pytest.mark.asyncio
+async def test_ss_searcher_degrades_gracefully_on_429(mocker, capsys):
+    """SS 429 should NOT abort the DAG — return empty list + warn."""
+    mocker.patch(
+        "paper_distiller.agents.searchers.ss_search",
+        side_effect=RuntimeError("SS search failed: Client error '429 ' for url 'https://api.semanticscholar.org/...'"),
+    )
+    ctx = _ctx_with_topic()
+    out = await SemanticScholarSearcher().run(ctx)
+    assert out == {"candidates_ss": []}
+    captured = capsys.readouterr()
+    assert "degraded" in captured.err.lower()
+
+
+@pytest.mark.asyncio
+async def test_searcher_non_transient_error_still_raises(mocker):
+    """Non-HTTP exceptions (e.g. AttributeError from a real bug) should still propagate."""
+    mocker.patch(
+        "paper_distiller.agents.searchers.arxiv_search",
+        side_effect=AttributeError("a real bug, not a network issue"),
+    )
+    ctx = _ctx_with_topic()
+    with pytest.raises(AttributeError):
+        await ArxivSearcher().run(ctx)

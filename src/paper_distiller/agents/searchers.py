@@ -1,15 +1,34 @@
 """Search-source agents — wrap existing sources/{arxiv,semantic_scholar}.py.
 
 Both run as no-deps agents and can execute in parallel (each level-0 in the DAG).
+
+Graceful degradation: HTTP failures (429, network errors) at one source
+are caught and converted to an empty candidates list with a stderr warning,
+so the other source can still feed the pipeline. Only unexpected exceptions
+propagate as AgentFailed.
 """
 
 from __future__ import annotations
 
 import asyncio
+import sys
 
 from ..sources.arxiv import search as arxiv_search
 from ..sources.semantic_scholar import search as ss_search
 from .base import Context
+
+
+def _is_transient_search_error(exc: Exception) -> bool:
+    """Return True for HTTP / network / rate-limit errors we should degrade on."""
+    s = str(exc).lower()
+    return (
+        "429" in s
+        or "client error" in s
+        or "server error" in s
+        or "http" in s and "error" in s
+        or "timeout" in s
+        or "connection" in s and ("refused" in s or "reset" in s or "aborted" in s)
+    )
 
 
 class ArxivSearcher:
@@ -20,11 +39,18 @@ class ArxivSearcher:
         if ctx.cfg.source not in ("arxiv", "both"):
             return {"candidates_arxiv": []}
         query = ctx.shared.get("next_query") or ctx.cfg.topic or ctx.cfg.author or ""
-        papers = await asyncio.to_thread(
-            arxiv_search,
-            query=query,
-            max_results=ctx.cfg.pool,
-        )
+        try:
+            papers = await asyncio.to_thread(
+                arxiv_search,
+                query=query,
+                max_results=ctx.cfg.pool,
+            )
+        except Exception as e:
+            if _is_transient_search_error(e):
+                print(f"  arxiv search degraded ({type(e).__name__}): {str(e)[:120]}",
+                      file=sys.stderr)
+                return {"candidates_arxiv": []}
+            raise
         return {"candidates_arxiv": papers}
 
 
@@ -36,10 +62,17 @@ class SemanticScholarSearcher:
         if ctx.cfg.source not in ("ss", "both"):
             return {"candidates_ss": []}
         query = ctx.shared.get("next_query") or ctx.cfg.topic or ctx.cfg.author or ""
-        papers = await asyncio.to_thread(
-            ss_search,
-            query=query,
-            max_results=ctx.cfg.pool,
-            api_key=ctx.cfg.ss_api_key,
-        )
+        try:
+            papers = await asyncio.to_thread(
+                ss_search,
+                query=query,
+                max_results=ctx.cfg.pool,
+                api_key=ctx.cfg.ss_api_key,
+            )
+        except Exception as e:
+            if _is_transient_search_error(e):
+                print(f"  SS search degraded ({type(e).__name__}): {str(e)[:120]}",
+                      file=sys.stderr)
+                return {"candidates_ss": []}
+            raise
         return {"candidates_ss": papers}
