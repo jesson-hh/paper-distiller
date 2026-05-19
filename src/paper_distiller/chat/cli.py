@@ -53,6 +53,26 @@ def build_parser() -> argparse.ArgumentParser:
     distill.add_argument("--model", help="Override PD_MODEL env var")
     distill.add_argument("--provider", help="Override PD_PROVIDER_NAME label")
 
+    browse = sub.add_parser(
+        "browse",
+        help="Search + show abstracts, pick which to distill (cheap interactive review)",
+    )
+    browse.add_argument("--vault", required=True)
+    browse.add_argument("--topic", help="Search topic")
+    browse.add_argument("--author", help="Search by author")
+    browse.add_argument(
+        "--n", type=int, default=10, help="How many candidates to show (default 10)"
+    )
+    browse.add_argument("--pool", type=int, default=30)
+    browse.add_argument(
+        "--source",
+        choices=["arxiv", "ss", "openalex", "both", "all"], default="all",
+    )
+    browse.add_argument("--dry-run", action="store_true")
+    browse.add_argument("--verbose", "-v", action="store_true")
+    browse.add_argument("--model")
+    browse.add_argument("--provider")
+
     ask = sub.add_parser("ask", help="QA loop: ask a research question, multiple rounds")
     ask.add_argument("--vault", required=True)
     ask.add_argument("--question", required=True)
@@ -181,6 +201,207 @@ async def _run_distill(args) -> int:
     print(f"  Tokens in/out:      {llm.total_tokens_in} / {llm.total_tokens_out}")
 
     # Render each distilled article body in the terminal (markdown → rich).
+    if articles:
+        from rich.markdown import Markdown
+        from rich.rule import Rule
+        for article in articles:
+            console.print()
+            console.print(Rule(f"[bold]{article.title}[/bold]  ([cyan]{article.slug}[/cyan])"))
+            console.print(Markdown(article.body))
+        console.print()
+    return 0
+
+
+def _render_browse_list(ranked, console) -> None:
+    """Print N candidates with abstracts for user review."""
+    from rich.rule import Rule
+    console.print(Rule(f"[bold]{len(ranked)} candidates[/bold]"))
+    for i, paper in enumerate(ranked, start=1):
+        year = (paper.published or "")[:4] or "?"
+        ident = paper.arxiv_id or paper.doi or paper.paper_id or "?"
+        authors_str = ", ".join(paper.authors[:3])
+        if len(paper.authors) > 3:
+            authors_str += f", et al. ({len(paper.authors) - 3} more)"
+        abstract_preview = (paper.abstract or "(no abstract)")[:250].replace("\n", " ")
+        if paper.abstract and len(paper.abstract) > 250:
+            abstract_preview += "..."
+        console.print(f"\n[bold][{i}][/bold] [cyan]{ident}[/cyan] ([dim]{year}[/dim])")
+        console.print(f"    [bold]{paper.title}[/bold]")
+        console.print(f"    [dim]─ {authors_str} ─[/dim]")
+        console.print(f"    [dim]Abstract:[/dim] {abstract_preview}")
+    console.print()
+
+
+def _parse_picks(s: str, n: int) -> list[int] | None:
+    """Parse user pick input. Returns sorted unique 1-based indices, or None on error/cancel.
+
+    - "q" / "quit" / "exit" / "" → []  (explicit cancel)
+    - "all" → range(1, n+1)
+    - "1,3,5" → [1, 3, 5]
+    - "1-3" → [1, 2, 3]
+    - "1,3-5,7" → [1, 3, 4, 5, 7]
+    - reversed range, out-of-range, non-numeric → None
+    """
+    s = s.strip().lower()
+    if not s or s in ("q", "quit", "exit"):
+        return []  # explicit cancel
+    if s == "all":
+        return list(range(1, n + 1))
+    picks: set[int] = set()
+    for part in s.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            try:
+                lo, hi = (int(x.strip()) for x in part.split("-", 1))
+            except ValueError:
+                return None
+            if lo > hi:
+                return None
+            for k in range(lo, hi + 1):
+                picks.add(k)
+        else:
+            try:
+                picks.add(int(part))
+            except ValueError:
+                return None
+    if not picks or any(p < 1 or p > n for p in picks):
+        return None
+    return sorted(picks)
+
+
+def _prompt_picks(n: int) -> list[int]:
+    """Prompt user with retry. Returns empty list on cancel or 3 failed attempts."""
+    for _attempt in range(3):
+        try:
+            raw = input(
+                "Pick papers to distill (e.g. '1,3,5' or '1-5' or 'all'; 'q' to quit): "
+            )
+        except (KeyboardInterrupt, EOFError):
+            return []
+        picks = _parse_picks(raw, n)
+        if picks is not None:
+            return picks
+        print(f"  invalid input. expected like '1,3-5' (range 1-{n}). Try again.")
+    print("  (3 invalid attempts; exiting)")
+    return []
+
+
+async def _run_browse(args) -> int:
+    try:
+        cfg = load_config(
+            vault_path=args.vault,
+            topic=args.topic,
+            author=args.author,
+            n=args.n,
+            pool=args.pool,
+            source=args.source,
+            dry_run=args.dry_run,
+            verbose=args.verbose,
+            model_override=args.model,
+            provider_override=args.provider,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 2
+
+    if cfg.dry_run:
+        print(f"[DRY-RUN] Would browse {cfg.top_n} candidates for {cfg.topic!r}")
+        return 0
+
+    vault = VaultStore(cfg.vault_path)
+    llm = LLMClient(cfg.api_key, cfg.base_url, cfg.model)
+    renderer = ConsoleRenderer(title=f"browse · {cfg.topic or cfg.author}")
+    ctx = Context(cfg=cfg, llm=llm, vault=vault, shared={}, on_status=renderer.on_status)
+
+    console = Console()
+
+    # Phase 1: search + rank (no distill)
+    browse_dag = DAG([
+        ArxivSearcher(),
+        SemanticScholarSearcher(),
+        OpenCLIOpenAlexSearcher(),
+        CandidateMerger(),
+        CandidateRanker(),
+    ])
+    orch = Orchestrator(browse_dag, ctx)
+    with Live(renderer.build_table(), refresh_per_second=10, console=console) as live:
+        async def _refresher():
+            while True:
+                live.update(renderer.build_table())
+                await asyncio.sleep(0.1)
+        refresher_task = asyncio.create_task(_refresher())
+        try:
+            await orch.run()
+        except AgentFailed as e:
+            print(f"\nAgent {e.agent_name!r} failed: {e.__cause__}", file=sys.stderr)
+            return 3
+        finally:
+            refresher_task.cancel()
+            try:
+                await refresher_task
+            except asyncio.CancelledError:
+                pass
+            live.update(renderer.build_table())
+
+    ranked = ctx.shared.get("ranked", [])
+    if not ranked:
+        print("\nNo candidates found.")
+        return 0
+
+    # Phase 2: render + pick
+    print()
+    _render_browse_list(ranked, console)
+    picks = _prompt_picks(len(ranked))
+    if not picks:
+        print("  (no papers picked; exiting)")
+        print(f"  Tokens used (search+rank): {llm.total_tokens_in} / {llm.total_tokens_out}")
+        return 0
+
+    # Phase 3: distill picked papers only
+    selected = [ranked[i - 1] for i in picks]
+    print(f"\n  Distilling {len(selected)} picked papers...")
+    ctx.shared["ranked"] = selected      # replace ranked with user-curated list
+    ctx.shared.pop("articles", None)     # clear any leftover state
+
+    processor = PaperProcessor()
+    processor.deps = []                  # bypass candidate-ranker dep
+    distill_dag = DAG([
+        processor,
+        VaultWriter(),
+        SurveyComposer(),
+    ])
+    # Reset renderer for clean second phase
+    renderer2 = ConsoleRenderer(title=f"distill · {len(selected)} picked")
+    ctx.on_status = renderer2.on_status
+    orch2 = Orchestrator(distill_dag, ctx)
+    with Live(renderer2.build_table(), refresh_per_second=10, console=console) as live:
+        async def _refresher2():
+            while True:
+                live.update(renderer2.build_table())
+                await asyncio.sleep(0.1)
+        rt = asyncio.create_task(_refresher2())
+        try:
+            await orch2.run()
+        except AgentFailed as e:
+            print(f"\nAgent {e.agent_name!r} failed: {e.__cause__}", file=sys.stderr)
+            return 3
+        finally:
+            rt.cancel()
+            try:
+                await rt
+            except asyncio.CancelledError:
+                pass
+            live.update(renderer2.build_table())
+
+    articles = ctx.shared.get("articles", [])
+    survey_slug = ctx.shared.get("survey_slug")
+    print()
+    print(f"  Articles distilled: {len(articles)}")
+    print(f"  Survey slug:        {survey_slug or '(none)'}")
+    print(f"  Tokens in/out:      {llm.total_tokens_in} / {llm.total_tokens_out}")
+
     if articles:
         from rich.markdown import Markdown
         from rich.rule import Rule
@@ -323,6 +544,8 @@ def main(argv: list | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.subcommand == "distill":
         return asyncio.run(_run_distill(args))
+    if args.subcommand == "browse":
+        return asyncio.run(_run_browse(args))
     if args.subcommand == "ask":
         return _run_ask(args)  # run_qa_loop wraps asyncio.run internally
     if args.subcommand == "resume":
