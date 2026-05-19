@@ -18,6 +18,16 @@ import asyncio
 import os
 import sys
 
+
+# Reconfigure stdout to UTF-8 BEFORE importing chat.ui — otherwise ui.py's
+# glyph-detection happens against the legacy GBK / cp936 encoding and falls
+# back to ASCII even on terminals that could handle the fancy chars.
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
 from rich.console import Console
 from rich.live import Live
 
@@ -565,19 +575,11 @@ def _run_agent(args) -> int:
         return 2
     llm = LLMClient(api_key=api_key, base_url=base_url, model=model)
 
-    console = Console()
-
-    def _announce(name: str, arguments: dict) -> None:
-        arg_preview = ", ".join(
-            f"{k}={_short(v)}" for k, v in list(arguments.items())[:4]
-        )
-        console.print(f"[dim]→ tool: [cyan]{name}[/cyan]({arg_preview})[/dim]")
-
+    # The UI module prints tool-call cards via _execute_one_tool_call; no
+    # need for the legacy on_tool_call hook (kept available for SDK users).
     loop = AgentLoop(
         llm=llm,
         vault_path=args.vault,
-        console=console,
-        on_tool_call=_announce,
     )
     return loop.run()
 

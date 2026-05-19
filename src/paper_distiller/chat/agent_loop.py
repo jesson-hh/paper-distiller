@@ -348,16 +348,18 @@ class AgentLoop:
                         # without a wrap-up text — keep quiet, the cards spoke
                         pass
                 except KeyboardInterrupt:
+                    from .ui import CANCEL_ICON
                     self.console.print(
-                        "\n[yellow]⊘ 当前工具已中止[/yellow]"
+                        f"\n[yellow]{CANCEL_ICON} 当前工具已中止[/yellow]"
                     )
                     self.messages.append({
                         "role": "user",
                         "content": "[system: 用户用 Ctrl-C 中止了上一步操作。请继续对话或建议下一步。]",
                     })
                 except Exception as e:
+                    from .ui import ERR_ICON
                     self.console.print(
-                        f"[red]✗ agent error:[/red] {type(e).__name__}: {e}"
+                        f"[red]{ERR_ICON} agent error:[/red] {type(e).__name__}: {e}"
                     )
                     continue
 

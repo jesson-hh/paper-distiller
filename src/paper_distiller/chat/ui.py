@@ -17,9 +17,8 @@ Color palette:
 
 from __future__ import annotations
 
-import json
+import sys
 
-from rich.align import Align
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
@@ -28,6 +27,11 @@ from rich.text import Text
 __all__ = [
     "BULLET",
     "PROMPT",
+    "RUNNING_ICON",
+    "DONE_ICON",
+    "LOGO",
+    "CANCEL_ICON",
+    "ERR_ICON",
     "print_welcome_banner",
     "print_status_line",
     "print_tool_call_running",
@@ -39,9 +43,27 @@ __all__ = [
 ]
 
 
-# Visual constants
-BULLET = "●"
-PROMPT = "❯"
+def _supports_unicode() -> bool:
+    """True if stdout can encode the fancy glyphs we'd like to use."""
+    enc = (getattr(sys.stdout, "encoding", "") or "").lower()
+    # UTF-8 / UTF-16 → fancy chars work. GBK / cp936 / ascii → fall back.
+    return "utf" in enc
+
+
+_FANCY = _supports_unicode()
+
+# Visual constants — Unicode preferred, ASCII fallback for legacy terminals
+BULLET = "●" if _FANCY else "*"
+RUNNING_ICON = "⏺" if _FANCY else ">"
+DONE_ICON = "●" if _FANCY else "*"
+PROMPT = "❯" if _FANCY else ">"
+LOGO = "✻" if _FANCY else "*"
+CANCEL_ICON = "⊘" if _FANCY else "X"
+ERR_ICON = "✗" if _FANCY else "x"
+ARROW = "→" if _FANCY else "->"
+DOT = "·" if _FANCY else "-"
+UP_ARROW = "↑" if _FANCY else "in"
+DOWN_ARROW = "↓" if _FANCY else "out"
 
 
 def print_welcome_banner(
@@ -53,7 +75,7 @@ def print_welcome_banner(
 ) -> None:
     """Print the startup banner. Modeled on Claude Code's welcome panel."""
     title = Text()
-    title.append("✻ ", style="bold cyan")
+    title.append(f"{LOGO} ", style="bold cyan")
     title.append("paper-distiller ", style="bold")
     title.append(f"v{version}", style="dim")
 
@@ -97,9 +119,10 @@ def print_status_line(
     """One-line dim status footer after each turn."""
     auto_chip = "[yellow]auto[/yellow]" if auto_mode else "[dim]auto:off[/dim]"
     console.print(
-        f"[dim]{model}[/dim]  [dim]·[/dim]  "
-        f"[dim]{tokens_in:,} ↑  {tokens_out:,} ↓[/dim]  [dim]·[/dim]  "
-        f"[dim]¥{cost_cny:.4f}[/dim]  [dim]·[/dim]  {auto_chip}"
+        f"[dim]{model}[/dim]  [dim]{DOT}[/dim]  "
+        f"[dim]{tokens_in:,} {UP_ARROW}  {tokens_out:,} {DOWN_ARROW}[/dim]  "
+        f"[dim]{DOT}[/dim]  "
+        f"[dim]¥{cost_cny:.4f}[/dim]  [dim]{DOT}[/dim]  {auto_chip}"
     )
 
 
@@ -137,7 +160,7 @@ def print_tool_call_running(
     """
     args_str = format_args_inline(arguments)
     text = Text()
-    text.append("⏺ ", style="bold cyan")
+    text.append(f"{RUNNING_ICON} ", style="bold cyan")
     text.append(name, style="bold cyan")
     text.append("(", style="dim")
     text.append(args_str, style="dim")
@@ -205,13 +228,13 @@ def print_tool_call_done(
     icon_style = "bold red" if is_error else "bold green"
 
     text = Text()
-    text.append(f"{BULLET} ", style=icon_style)
+    text.append(f"{DONE_ICON} ", style=icon_style)
     text.append(name, style="bold cyan")
     text.append("(", style="dim")
     text.append(args_str, style="dim")
     text.append(")  ", style="dim")
     if summary:
-        text.append("→ ", style="dim")
+        text.append(f"{ARROW} ", style="dim")
         text.append_text(Text.from_markup(summary))
     if duration_sec is not None and duration_sec >= 0.5:
         text.append(f"  [{duration_sec:.1f}s]", style="dim")
