@@ -59,12 +59,12 @@ class PaperProcessor:
     deps = ["candidate-ranker"]
 
     def expand(self, ctx: Context) -> list[Agent]:
+        # Always setdefault — never clobber. QA-mode accumulates articles
+        # across rounds; a round with zero ranked papers must not wipe them.
+        ctx.shared.setdefault("articles", [])
         papers = ctx.shared.get("ranked", [])
         if not papers:
-            # initialize empty list so downstream agents always see the key
-            ctx.shared["articles"] = []
             return []
-        ctx.shared.setdefault("articles", [])
         tmpdir = Path(tempfile.mkdtemp(prefix="paper-distiller-"))
         wiki_index = load_index(ctx.vault)
         return [

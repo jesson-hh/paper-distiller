@@ -96,3 +96,18 @@ async def test_processor_no_ranked_papers_is_noop():
 @pytest.mark.asyncio
 async def test_processor_deps():
     assert PaperProcessor().deps == ["candidate-ranker"]
+
+
+@pytest.mark.asyncio
+async def test_processor_empty_ranked_preserves_prior_articles():
+    """Regression: in QA mode, a round with zero ranked papers must
+    NOT clobber `ctx.shared['articles']` accumulated from prior rounds."""
+    prior = [ArticleResult(
+        slug="prior", title="Prior", body="b",
+        tags=[], refs=[], depth="full-pdf",
+    )]
+    ctx = _ctx_with_ranked([])
+    ctx.shared["articles"] = list(prior)  # simulate prior rounds
+    orch = Orchestrator(DAG([_StubRanker(), PaperProcessor()]), ctx)
+    await orch.run()
+    assert ctx.shared["articles"] == prior
