@@ -58,3 +58,41 @@ def test_repl_dispatch_natural_language_uses_router(mocker, tmp_path, capsys, mo
     captured = capsys.readouterr()
     assert "Intent: ask" in captured.out
     assert "question" in captured.out.lower()
+
+
+def test_repl_dispatch_nl_show_routes_to_handle_show(mocker, tmp_path, capsys, monkeypatch):
+    """NL classified as 'show' should NOT go through cli.main (no show subcommand);
+    instead, route directly to handle_show and display the article."""
+    monkeypatch.setenv("PD_API_KEY", "sk-test")
+    monkeypatch.setenv("PD_BASE_URL", "https://x/v1")
+    monkeypatch.setenv("PD_MODEL", "qwen-plus")
+    # Set up a vault with an article so handle_show finds it
+    (tmp_path / "articles").mkdir()
+    (tmp_path / "articles" / "myslug.md").write_text(
+        "---\ntitle: My Article\n---\n\n# My Article\n\nMy content body.",
+        encoding="utf-8",
+    )
+
+    fake_router_class = mocker.patch("paper_distiller.chat.repl.loop.IntentRouter")
+    fake_router_class.return_value.classify.return_value = {
+        "command": "show",
+        "params": {"slug": "myslug"},
+        "missing_params": [],
+        "confidence": 9,
+    }
+    # Confirm = True so we proceed past the confirmation gate
+    mocker.patch("paper_distiller.chat.repl.loop._confirm", return_value=True)
+    mocker.patch("paper_distiller.chat.repl.loop.LLMClient")
+    # Sanity: if the fix is missing, cli.main would be invoked and would SystemExit
+    fake_cli_main = mocker.patch("paper_distiller.chat.cli.main")
+
+    from paper_distiller.chat.repl.loop import REPL
+    r = REPL(vault_path=tmp_path)
+    r.dispatch_one("看看 myslug")
+
+    captured = capsys.readouterr()
+    # The article content should be printed
+    assert "My Article" in captured.out
+    assert "My content body." in captured.out
+    # cli.main MUST NOT have been called (the bug was that it WAS called for show)
+    fake_cli_main.assert_not_called()

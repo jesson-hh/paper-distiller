@@ -143,7 +143,18 @@ class REPL:
         for k in parsed["missing_params"]:
             if k in _AGENT_DEFAULTS.get(cmd, {}):
                 params[k] = _AGENT_DEFAULTS[cmd][k]
-        # Build argv and run
+
+        # `show` is a read-only command — dispatch directly via handle_show,
+        # NOT through cli.main (cli has no `show` subcommand).
+        if cmd == "show":
+            slug = params.get("slug")
+            if not slug:
+                print("  (no slug provided)")
+                return None
+            print(handle_show(self.vault_path, slug))
+            return None
+
+        # Build argv and run via cli.main for distill/ask/resume
         argv = self._params_to_argv(cmd, params)
         return self._dispatch_action(cmd, argv[1:])  # skip leading cmd
 
