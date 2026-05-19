@@ -21,11 +21,12 @@ from ..agents.processor import PaperProcessor
 from ..agents.renderer import ConsoleRenderer
 from ..agents.searchers import ArxivSearcher, SemanticScholarSearcher
 from ..agents.writer import SurveyComposer, VaultWriter
-from ..config import load_config, load_config_qa
+from ..config import load_config, load_config_qa, load_config_research
 from ..llm.openai_compatible import LLMClient
 from ..vault.store import VaultStore
 from .qa_runner import run_qa_loop
 from .repl.loop import REPL
+from .research_runner import run_research_loop
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -69,7 +70,34 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--verbose", "-v", action="store_true")
     resume.add_argument("--model")
     resume.add_argument("--provider")
+
+    research = sub.add_parser("research", help="Deep research: 4h autonomous loop on a question")
+    research.add_argument("--vault", required=True)
+    research.add_argument("--question", required=True)
+    research.add_argument("--max-papers", type=int, default=30)
+    research.add_argument("--max-cost-cny", type=float, default=30.0)
+    research.add_argument("--duration", default="4h",
+                          help="Time budget, e.g. '2h', '30m', '1h30m', '3600s'")
+    research.add_argument("--source", choices=["arxiv", "ss", "both"], default="both")
+    research.add_argument("--resume", help="Resume session-id")
+    research.add_argument("--dry-run", action="store_true")
+    research.add_argument("--verbose", "-v", action="store_true")
+    research.add_argument("--model")
+    research.add_argument("--provider")
     return p
+
+
+def _parse_duration(s: str) -> int:
+    """Parse '4h' / '30m' / '1h30m' / '3600s' → seconds."""
+    import re
+    m = re.match(r"^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$", s.strip())
+    if not m or not any(m.groups()):
+        raise ValueError(f"invalid duration: {s!r}")
+    h, mn, sc = (int(g or 0) for g in m.groups())
+    total = h * 3600 + mn * 60 + sc
+    if total < 60:
+        raise ValueError(f"duration too short: {total}s (min 60s)")
+    return total
 
 
 def _build_single_pass_dag() -> DAG:
@@ -236,6 +264,50 @@ def _run_resume(args) -> int:
     return 0
 
 
+def _run_research(args) -> int:
+    try:
+        duration_sec = _parse_duration(args.duration)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 2
+    try:
+        cfg = load_config_research(
+            vault_path=args.vault, question=args.question,
+            max_papers=args.max_papers,
+            max_cost_cny=args.max_cost_cny,
+            max_duration_sec=duration_sec,
+            source=args.source,
+            resume_session_id=args.resume,
+            verbose=args.verbose, dry_run=args.dry_run,
+            model_override=args.model, provider_override=args.provider,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 2
+    if cfg.dry_run:
+        print(f"[DRY-RUN] Would run deep research on {cfg.qa_question!r}")
+        return 0
+    try:
+        summary = run_research_loop(cfg)
+    except Exception as e:
+        print(f"\nError during research: {type(e).__name__}: {e}", file=sys.stderr)
+        if args.verbose:
+            import traceback
+            traceback.print_exc(file=sys.stderr)
+        return 3
+    print()
+    print(f"  Session:        {summary['session_id']}")
+    print(f"  Stop reason:    {summary['stop_reason']}")
+    print(f"  Papers:         {summary['papers_distilled_count']}")
+    print(f"  Themes:         {summary['themes_count']}")
+    print(f"  Syntheses:      {summary['synthesis_count']}")
+    print(f"  Final report:   {summary['final_report_slug'] or '(none)'}")
+    print(f"  Iterations:     {summary['iterations_completed']}")
+    print(f"  Cost:           CNY {summary['total_cost_cny']:.2f}")
+    print(f"  Tokens:         {summary['total_tokens_in']} / {summary['total_tokens_out']}")
+    return 0
+
+
 def main(argv: list | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.subcommand == "distill":
@@ -244,6 +316,8 @@ def main(argv: list | None = None) -> int:
         return _run_ask(args)  # run_qa_loop wraps asyncio.run internally
     if args.subcommand == "resume":
         return _run_resume(args)
+    if args.subcommand == "research":
+        return _run_research(args)
     # No subcommand: launch REPL (requires --vault)
     if not getattr(args, "vault", None):
         print("Error: --vault is required when launching REPL", file=sys.stderr)
