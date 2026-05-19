@@ -2,6 +2,16 @@
 
 All notable changes documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.3.0] — 2026-05-19
+
+### Added
+- **`paper-distiller-chat browse`** — search + LLM-rank, then **render N candidates with title / authors / year / abstract preview** and prompt the user to pick which to distill. Picked papers go through the full distill pipeline (PDF download + LLM distill + vault write); unpicked papers cost nothing further.
+- Decouples search (cheap — single ranker LLM call ~¥0.05) from distillation (expensive — ~¥0.20/paper). Good for "I want to review before spending budget" workflows. Pick syntax: `1,3,5` / `1-5` / `1,3-5,7` / `all` / `q` to cancel.
+
+### Internal
+- 9 new tests covering pick-parser (`_parse_picks`) edge cases + argparse wiring. Total: **221** (was 212).
+- No new runtime deps. Reuses existing agent framework — Phase 1 DAG stops after `CandidateRanker`; Phase 2 reuses `PaperProcessor` + `VaultWriter` + `SurveyComposer` with `processor.deps=[]` instance override (no candidate-ranker re-rank needed since user already picked).
+
 ## [1.2.0] — 2026-05-19
 
 ### Added
