@@ -140,6 +140,16 @@ async def _run_distill(args) -> int:
     print(f"  Articles distilled: {len(articles)}")
     print(f"  Survey slug:        {survey_slug or '(none)'}")
     print(f"  Tokens in/out:      {llm.total_tokens_in} / {llm.total_tokens_out}")
+
+    # Render each distilled article body in the terminal (markdown → rich).
+    if articles:
+        from rich.markdown import Markdown
+        from rich.rule import Rule
+        for article in articles:
+            console.print()
+            console.print(Rule(f"[bold]{article.title}[/bold]  ([cyan]{article.slug}[/cyan])"))
+            console.print(Markdown(article.body))
+        console.print()
     return 0
 
 

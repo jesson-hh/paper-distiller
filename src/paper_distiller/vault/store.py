@@ -193,6 +193,13 @@ class VaultStore:
             "created": created, "updated": now,
         }
         path.write_text(dump_frontmatter(meta, body), encoding="utf-8")
+        # Also write an HTML rendering alongside the .md (best-effort).
+        try:
+            from .html_render import render_html
+            html_path = path.with_suffix(".html")
+            html_path.write_text(render_html(title, body), encoding="utf-8")
+        except Exception:
+            pass  # don't let HTML rendering failures break the markdown save
         return {**meta, "path": str(path).replace("\\", "/")}
 
     def read_entry(self, category: str, slug: str) -> Entry | None:
