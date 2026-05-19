@@ -2,27 +2,40 @@
 
 > Distill arxiv research papers into an Obsidian-compatible markdown wiki.
 
-[![CI](https://github.com/jesson-hh/math-research-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/jesson-hh/math-research-agent/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-0.5.0-green.svg)
+[![CI](https://github.com/jesson-hh/paper-distiller/actions/workflows/ci.yml/badge.svg)](https://github.com/jesson-hh/paper-distiller/actions/workflows/ci.yml)
+[![PyPI version](https://img.shields.io/pypi/v/paper-distiller.svg)](https://pypi.org/project/paper-distiller/)
+[![Python versions](https://img.shields.io/pypi/pyversions/paper-distiller.svg)](https://pypi.org/project/paper-distiller/)
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
-![Python: 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)
 
 ## What it does
 
-Give `paper-distiller` a research topic or an author name, and it will:
+paper-distiller has two modes, both writing into the same Obsidian-compatible vault:
 
-1. Search arxiv for relevant papers
+**`paper-distiller`** — single-pass mode. Give it a topic or author and it will:
+1. Search arxiv + Semantic Scholar for relevant papers
 2. Use an LLM to rank the top N most relevant
 3. Download each PDF and extract the text
 4. Distill each paper into a structured Chinese markdown note (一句话 / 问题动因 / 方法 / 关键结果 / 我的 take)
-5. Cross-link each note to existing entries in your Obsidian vault via `[[wikilinks]]`
+5. Cross-link each note to existing entries in your vault via `[[wikilinks]]`
 6. Compose a session survey tying the new notes together
+
+**`paper-distiller-qa`** *(new in v0.5)* — question-driven multi-round research loop. Give it a *research question* and it will:
+1. Have the LLM judge what's known vs. missing each round, and propose the next search query
+2. Run the single-pass distillation pipeline on the top N results
+3. Repeat until the LLM is confident, OR a budget cap fires (rounds / articles / cost / `Ctrl+C`)
+4. Synthesize a final cited answer document with an audit trail of all rounds
 
 The output drops directly into a vault directory that opens in Obsidian — graph view, Dataview, tag pane, full-text search all work out of the box.
 
-## Install (from source)
+## Install
 
-    git clone https://github.com/jesson-hh/math-research-agent paper-distiller
+**From PyPI**:
+
+    pip install paper-distiller
+
+**From source** (for development or the latest unreleased changes):
+
+    git clone https://github.com/jesson-hh/paper-distiller
     cd paper-distiller
     python -m venv .venv
     .venv\Scripts\activate          # Windows
@@ -36,21 +49,46 @@ The output drops directly into a vault directory that opens in Obsidian — grap
        cp examples/example.env .env
        # then edit .env, replace PD_API_KEY=sk-your-key-here with your real key
 
-2. Point it at your Obsidian vault:
+2. Point it at your Obsidian vault. Pick a mode:
+
+   **Single-pass** — distill N papers on a topic:
 
        paper-distiller --vault /path/to/your/vault --topic "diffusion models for finance" --n 5
 
-3. Open your vault in Obsidian. New articles appear under `articles/`, a session survey under `surveys/`.
+   **Question-driven** — let the agent plan multiple rounds and answer a question:
+
+       paper-distiller-qa --vault /path/to/your/vault \
+                          --question "What are the latest advances in diffusion models for long-horizon time-series forecasting?" \
+                          --max-rounds 3 --per-round 2 --max-cost-cny 5
+
+3. Open your vault in Obsidian. New articles appear under `articles/`, a session survey under `surveys/`. QA sessions also write `<vault>/.paper_distiller/qa-sessions/<sid>/state.json` for `--resume` after a pause or crash.
 
 ## How it works
 
+**Single-pass** (`paper-distiller`):
+
 ```
-search arxiv  →  LLM filter  →  download PDFs  →  distill each  →  save articles  →  compose survey
-   (~30 hits)     (→ top N)        (PyMuPDF)       (LLM call)       (markdown +       (LLM call)
-                                                                     frontmatter)
+search arxiv + SS  →  LLM filter  →  fetch PDFs       →  distill each  →  save articles  →  compose survey
+   (~30 hits)         (→ top N)      (with fallback)     (LLM call)       (md+frontmatter)   (LLM call)
 ```
 
-Per-paper cost on `qwen-plus` / `qwen3.5-plus` (Aliyun Bailian): roughly $0.02 per paper. A 5-paper run is around $0.10 USD (~¥0.70).
+**Question-driven** (`paper-distiller-qa`) wraps the above in a state-machine loop:
+
+```
+                ┌──────────────────────────────────────────────────────────┐
+                │   LLM reflect  →  search  →  rank  →  distill (N papers) │  ← one round
+                │       ↑                                          │       │
+                │       └──────────────────────────────────────────┘       │
+                │                                                          │
+                │   Stops when: LLM done / budget hit / no new candidates  │
+                └──────────────────────────────────────────────────────────┘
+                                       ↓
+                          synthesize cited answer  →  surveys/qa-….md
+```
+
+Per-paper cost on `qwen-plus` / `qwen3.5-plus` (Aliyun Bailian): roughly $0.02 per paper. A 5-paper single-pass run is around $0.10 USD (~¥0.70). A typical 3-round QA session with 2 papers/round costs ~¥1.5-3.
+
+For module structure, data flow internals, the 7 stop reasons, and how state persistence works, see **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
 
 ## Vault layout
 
@@ -80,14 +118,34 @@ CLI flags override env vars where applicable (`--model`, `--provider`).
 ## CLI reference
 
     paper-distiller --vault <path> {--topic <str> | --author <str>}
-                    [--n 5] [--pool 30] [--force] [--dry-run]
-                    [--verbose] [--model <name>] [--provider <name>]
+                    [--n 5] [--pool 30] [--source {arxiv,ss,both}]
+                    [--force] [--dry-run] [--verbose] [--model <name>] [--provider <name>]
+
+    paper-distiller-qa --vault <path> --question <str>
+                       [--max-rounds 5] [--max-articles 15] [--max-cost-cny 20.0]
+                       [--confidence-threshold 8] [--per-round 2]
+                       [--source {arxiv,ss,both}] [--interactive] [--resume <session-id>]
+                       [--dry-run] [--verbose] [--model <name>] [--provider <name>]
 
 `--dry-run` skips all LLM calls and vault writes — useful for verifying config before spending API budget.
 
+`paper-distiller-qa` flags worth knowing:
+
+| Flag | What it does |
+|---|---|
+| `--max-rounds N` | Hard upper bound on loop iterations (default 5). The loop also exits early on `llm_done`, `llm_brake`, `no_candidates`, or budget caps. |
+| `--max-articles N` | Stop after distilling N total articles across rounds (default 15) |
+| `--max-cost-cny F` | Cost circuit breaker, CNY (default 20.0). Uses qwen-plus pricing. |
+| `--confidence-threshold N` | LLM `is_done` confidence required to stop early (0-10, default 8) |
+| `--interactive` | Pause after each round and prompt Y/n/q |
+| `--resume <sid>` | Pick up a paused or errored session from its state.json |
+
 ## Customizing prompts
 
-The 3 distillation prompts live as plain markdown at `src/paper_distiller/prompts/{filter,article,survey}.md`. Edit them directly to change the tone, structure, or language of generated notes — no Python changes needed.
+All 5 LLM prompts live as plain markdown — edit them directly to change tone, structure, or output language. No Python changes needed.
+
+- `src/paper_distiller/prompts/{filter,article,survey}.md` — single-pass mode
+- `src/paper_distiller/qa/prompts/{reflect,answer}.md` — question-driven mode
 
 ## Optional companion: semantic search via vault-mcp
 
@@ -111,19 +169,20 @@ The default category schema (articles / techniques / directions / open-problems 
 
 ## Status
 
-**v0.3.0 — alpha.** Two-source (arxiv + Semantic Scholar) search-and-distill with PDF fallback works end-to-end. Not yet on PyPI; install from GitHub.
+**v0.5.0 — alpha.** Single-pass (`paper-distiller`) and question-driven multi-round (`paper-distiller-qa`) modes both work end-to-end. 78 tests passing on Python 3.10/3.11/3.12.
 
 ### Shipped
 
 - **v0.1.0** — L2 single-pass search-and-distill against arxiv; LLM filter + ranker; PyMuPDF-based extraction; Obsidian-compatible markdown output.
 - **v0.2.0** — arxiv-id-based dedup (prevents sibling articles for the same paper under different slugs); restored 500-char full-pdf threshold.
 - **v0.3.0** — Semantic Scholar as second paper source (`--source {arxiv,ss,both}`, default both); PDF fallback chain (when arxiv's PDF download fails, try SS's `openAccessPdf`); DOI-based dedup.
+- **v0.5.0** — `paper-distiller-qa` question-driven multi-round research loop. State-machine with 7 stop reasons, `--interactive` and `--resume` modes, audit-trail-equipped final answer survey. (See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for internals.)
 
 ### Future roadmap
 
-- **v0.4** — *deferred*. We explored shipping our own semantic-search MCP server; concluded the right answer is to recommend [vault-mcp](https://github.com/robbiemu/vault-mcp) instead (see [docs/vault-mcp-recommendation.md](docs/vault-mcp-recommendation.md)).
-- **v0.5** — multi-round autonomous research loop (the "L3" mode from the original design doc): given a high-level goal, agent plans search iterations, follows citations, identifies gaps, runs to convergence.
-- **v0.6** — extend paper-distiller's sources beyond arxiv + Semantic Scholar. Likely candidate: integrate [OpenCLI](https://github.com/jackwener/OpenCLI) to pull from logged-in browser sessions (ACM Digital Library, IEEE Xplore, lab homepages, Chinese platforms like 知乎/B站). Useful for venue-only papers and discussion context around papers.
+- **v0.4** — *deferred*. We explored shipping our own semantic-search MCP server; concluded the right answer is to recommend [vault-mcp](https://github.com/robbiemu/vault-mcp) instead (see [docs/vault-mcp-recommendation.md](docs/vault-mcp-recommendation.md)). No v0.4 tag exists.
+- **v0.6** — citation-graph traversal: given a seed article, follow its references / cited-by edges and rank them for inclusion.
+- **v0.7** — broaden sources beyond arxiv + Semantic Scholar. Likely candidate: integrate [OpenCLI](https://github.com/jackwener/OpenCLI) to pull from logged-in browser sessions (ACM Digital Library, IEEE Xplore, lab homepages, Chinese platforms like 知乎/B站). Useful for venue-only papers and discussion context around papers.
 - **Later / on-demand** — per-vault `paper-distiller.toml` for custom category schemas; LEANN-backed in-pipeline crosslink retrieval (useful only when vault grows past ~500 entries).
 
 ### Known limitations
