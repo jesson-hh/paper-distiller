@@ -21,9 +21,10 @@ from ..agents.processor import PaperProcessor
 from ..agents.renderer import ConsoleRenderer
 from ..agents.searchers import ArxivSearcher, SemanticScholarSearcher
 from ..agents.writer import SurveyComposer, VaultWriter
-from ..config import load_config
+from ..config import load_config, load_config_qa
 from ..llm.openai_compatible import LLMClient
 from ..vault.store import VaultStore
+from .qa_runner import run_qa_loop
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -44,6 +45,21 @@ def build_parser() -> argparse.ArgumentParser:
     distill.add_argument("--verbose", "-v", action="store_true")
     distill.add_argument("--model", help="Override PD_MODEL env var")
     distill.add_argument("--provider", help="Override PD_PROVIDER_NAME label")
+
+    ask = sub.add_parser("ask", help="QA loop: ask a research question, multiple rounds")
+    ask.add_argument("--vault", required=True)
+    ask.add_argument("--question", required=True)
+    ask.add_argument("--max-rounds", type=int, default=5)
+    ask.add_argument("--max-articles", type=int, default=15)
+    ask.add_argument("--max-cost-cny", type=float, default=20.0)
+    ask.add_argument("--confidence-threshold", type=int, default=8)
+    ask.add_argument("--per-round", type=int, default=2)
+    ask.add_argument("--source", choices=["arxiv", "ss", "both"], default="both")
+    ask.add_argument("--interactive", action="store_true")
+    ask.add_argument("--dry-run", action="store_true")
+    ask.add_argument("--verbose", "-v", action="store_true")
+    ask.add_argument("--model")
+    ask.add_argument("--provider")
     return p
 
 
@@ -118,10 +134,54 @@ async def _run_distill(args) -> int:
     return 0
 
 
+def _run_ask(args) -> int:
+    try:
+        cfg = load_config_qa(
+            vault_path=args.vault,
+            question=args.question,
+            max_rounds=args.max_rounds,
+            max_articles=args.max_articles,
+            max_cost_cny=args.max_cost_cny,
+            confidence_threshold=args.confidence_threshold,
+            per_round=args.per_round,
+            source=args.source,
+            interactive=args.interactive,
+            resume_session_id=None,
+            verbose=args.verbose,
+            dry_run=args.dry_run,
+            model_override=args.model,
+            provider_override=args.provider,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 2
+    if cfg.dry_run:
+        print(f"[DRY-RUN] Would run QA loop for {cfg.qa_question!r}")
+        return 0
+    try:
+        summary = run_qa_loop(cfg)
+    except Exception as e:
+        print(f"\nError during QA loop: {type(e).__name__}: {e}", file=sys.stderr)
+        if args.verbose:
+            import traceback
+            traceback.print_exc(file=sys.stderr)
+        return 3
+    print()
+    print(f"  Session:      {summary['session_id']}")
+    print(f"  Stop reason:  {summary['stop_reason']}")
+    print(f"  Rounds:       {summary['rounds_completed']}")
+    print(f"  Articles:     {summary['articles_distilled_count']}")
+    print(f"  Cost:         CNY {summary['cost_cny']:.2f}")
+    print(f"  Tokens:       {summary['tokens_in_total']} / {summary['tokens_out_total']}")
+    return 0
+
+
 def main(argv: list | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.subcommand == "distill":
         return asyncio.run(_run_distill(args))
+    if args.subcommand == "ask":
+        return _run_ask(args)  # run_qa_loop wraps asyncio.run internally
     return 2
 
 
