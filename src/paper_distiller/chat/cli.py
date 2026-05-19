@@ -25,14 +25,16 @@ from ..config import load_config, load_config_qa
 from ..llm.openai_compatible import LLMClient
 from ..vault.store import VaultStore
 from .qa_runner import run_qa_loop
+from .repl.loop import REPL
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="paper-distiller-chat",
-        description="Chat-first paper distillation. Plan-1 subset: one-shot `distill`.",
+        description="Chat-first paper distillation.",
     )
-    sub = p.add_subparsers(dest="subcommand", required=True)
+    p.add_argument("--vault", help="Vault path (used when launching REPL without subcommand)")
+    sub = p.add_subparsers(dest="subcommand", required=False)
 
     distill = sub.add_parser("distill", help="Single-pass: search a topic, distill N papers")
     distill.add_argument("--vault", required=True)
@@ -232,7 +234,12 @@ def main(argv: list | None = None) -> int:
         return _run_ask(args)  # run_qa_loop wraps asyncio.run internally
     if args.subcommand == "resume":
         return _run_resume(args)
-    return 2
+    # No subcommand: launch REPL (requires --vault)
+    if not getattr(args, "vault", None):
+        print("Error: --vault is required when launching REPL", file=sys.stderr)
+        return 2
+    repl = REPL(vault_path=args.vault)
+    return repl.run()
 
 
 if __name__ == "__main__":
