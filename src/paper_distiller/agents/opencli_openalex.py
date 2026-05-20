@@ -14,6 +14,7 @@ import sys
 
 from ..sources.arxiv import Paper
 from .base import Context
+from .rate_limit import OPENALEX_LIMITER
 
 
 async def _opencli_call(args: list, timeout: float = 60.0) -> list:
@@ -133,6 +134,15 @@ class OpenCLIOpenAlexSearcher:
         if not query.strip():
             return {"candidates_openalex": []}
 
+        if not await OPENALEX_LIMITER.acquire():
+            cd = OPENALEX_LIMITER.seconds_until_ready()
+            print(
+                f"  openalex cooling down ({cd:.0f}s remaining); skipping",
+                file=sys.stderr,
+            )
+            ctx.shared.setdefault("degraded_sources", []).append("openalex")
+            return {"candidates_openalex": []}
+
         # Step 1: search. Stay reasonable on limit even though OpenAlex allows 200.
         limit = min(getattr(ctx.cfg, "pool", 30), 25)
         search_results = await _opencli_call(
@@ -140,7 +150,10 @@ class OpenCLIOpenAlexSearcher:
         )
         if not search_results:
             # Mark openalex as degraded so tool_search can distinguish empty
-            # results from "all sources rate-limited" thrashing.
+            # results from "all sources rate-limited" thrashing. Also engage a
+            # cooldown so the next LLM-driven retry won't immediately re-hit
+            # the broken endpoint.
+            OPENALEX_LIMITER.mark_429()
             ctx.shared.setdefault("degraded_sources", []).append("openalex")
             return {"candidates_openalex": []}
 

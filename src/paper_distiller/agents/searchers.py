@@ -16,6 +16,7 @@ import sys
 from ..sources.arxiv import search as arxiv_search
 from ..sources.semantic_scholar import search as ss_search
 from .base import Context
+from .rate_limit import ARXIV_LIMITER, SS_LIMITER
 
 
 def _is_transient_search_error(exc: Exception) -> bool:
@@ -44,6 +45,14 @@ class ArxivSearcher:
     async def run(self, ctx: Context) -> dict:
         if ctx.cfg.source not in ("arxiv", "both", "all"):
             return {"candidates_arxiv": []}
+        if not await ARXIV_LIMITER.acquire():
+            cd = ARXIV_LIMITER.seconds_until_ready()
+            print(
+                f"  arxiv cooling down ({cd:.0f}s remaining); skipping",
+                file=sys.stderr,
+            )
+            _mark_degraded(ctx, "arxiv")
+            return {"candidates_arxiv": []}
         query = ctx.shared.get("next_query") or ctx.cfg.topic or ctx.cfg.author or ""
         try:
             papers = await asyncio.to_thread(
@@ -53,6 +62,7 @@ class ArxivSearcher:
             )
         except Exception as e:
             if _is_transient_search_error(e):
+                ARXIV_LIMITER.mark_429()
                 print(f"  arxiv search degraded ({type(e).__name__}): {str(e)[:120]}",
                       file=sys.stderr)
                 _mark_degraded(ctx, "arxiv")
@@ -68,6 +78,14 @@ class SemanticScholarSearcher:
     async def run(self, ctx: Context) -> dict:
         if ctx.cfg.source not in ("ss", "both", "all"):
             return {"candidates_ss": []}
+        if not await SS_LIMITER.acquire():
+            cd = SS_LIMITER.seconds_until_ready()
+            print(
+                f"  SS cooling down ({cd:.0f}s remaining); skipping",
+                file=sys.stderr,
+            )
+            _mark_degraded(ctx, "ss")
+            return {"candidates_ss": []}
         query = ctx.shared.get("next_query") or ctx.cfg.topic or ctx.cfg.author or ""
         try:
             papers = await asyncio.to_thread(
@@ -78,6 +96,7 @@ class SemanticScholarSearcher:
             )
         except Exception as e:
             if _is_transient_search_error(e):
+                SS_LIMITER.mark_429()
                 print(f"  SS search degraded ({type(e).__name__}): {str(e)[:120]}",
                       file=sys.stderr)
                 _mark_degraded(ctx, "ss")
