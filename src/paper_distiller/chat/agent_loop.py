@@ -179,12 +179,20 @@ class AgentLoop:
         return "(达到单轮工具调用上限。如有需要请重新提问，或拆分成更小的步骤。)"
 
     def _stream_one_response(self):
-        """Drive one LLM call. Returns (final_text, list_of_ToolCall)."""
+        """Drive one LLM call. Returns (final_text, list_of_ToolCall).
+
+        Shows a spinner ('LLM thinking...') during the silent gap between
+        request and first stream chunk — qwen3.5-plus etc. can take 5-30s
+        to first token, and without feedback users think the REPL is hung.
+        """
         from ..llm.openai_compatible import ToolCall
 
         # Fallback path for LLMs that only implement complete_with_tools.
         if not hasattr(self.llm, "complete_with_tools_stream"):
-            resp = self.llm.complete_with_tools(self.messages, TOOL_SCHEMAS)
+            with self.console.status(
+                "[dim]LLM thinking…[/dim]", spinner="dots", spinner_style="cyan",
+            ):
+                resp = self.llm.complete_with_tools(self.messages, TOOL_SCHEMAS)
             if resp.text:
                 print_assistant_bullet(self.console)
                 self._render_text_delta(resp.text)
@@ -197,34 +205,59 @@ class AgentLoop:
         current_call_id: str | None = None
         bullet_printed = False
 
-        for chunk in self.llm.complete_with_tools_stream(self.messages, TOOL_SCHEMAS):
-            if chunk.text_delta:
-                if not bullet_printed:
-                    print_assistant_bullet(self.console)
-                    bullet_printed = True
-                text_pieces.append(chunk.text_delta)
-                self._render_text_delta(chunk.text_delta)
-            if chunk.tool_call_id:
-                current_call_id = chunk.tool_call_id
-                if current_call_id not in partial:
-                    partial[current_call_id] = {"name": "", "arguments": ""}
-                    order.append(current_call_id)
-            if chunk.tool_name_delta:
-                if current_call_id is None:
-                    if not order:
-                        current_call_id = "__implicit__"
-                        order.append(current_call_id)
+        spinner_ctx = self.console.status(
+            "[dim]LLM thinking…[/dim]", spinner="dots", spinner_style="cyan",
+        )
+        spinner_ctx.start()
+        spinner_active = True
+
+        def _stop_spinner_if_active():
+            nonlocal spinner_active
+            if spinner_active:
+                spinner_ctx.stop()
+                spinner_active = False
+
+        try:
+            for chunk in self.llm.complete_with_tools_stream(self.messages, TOOL_SCHEMAS):
+                # First sign of life from the server — kill the spinner so the
+                # real content (text or tool-call card) renders cleanly.
+                if (
+                    chunk.text_delta
+                    or chunk.tool_call_id
+                    or chunk.tool_name_delta
+                    or chunk.tool_arg_delta
+                ):
+                    _stop_spinner_if_active()
+
+                if chunk.text_delta:
+                    if not bullet_printed:
+                        print_assistant_bullet(self.console)
+                        bullet_printed = True
+                    text_pieces.append(chunk.text_delta)
+                    self._render_text_delta(chunk.text_delta)
+                if chunk.tool_call_id:
+                    current_call_id = chunk.tool_call_id
+                    if current_call_id not in partial:
                         partial[current_call_id] = {"name": "", "arguments": ""}
-                    else:
-                        current_call_id = order[-1]
-                partial[current_call_id]["name"] += chunk.tool_name_delta
-            if chunk.tool_arg_delta:
-                cid = current_call_id or (order[-1] if order else None)
-                if cid is None:
-                    continue
-                partial[cid]["arguments"] += chunk.tool_arg_delta
-            if chunk.finish_reason:
-                break
+                        order.append(current_call_id)
+                if chunk.tool_name_delta:
+                    if current_call_id is None:
+                        if not order:
+                            current_call_id = "__implicit__"
+                            order.append(current_call_id)
+                            partial[current_call_id] = {"name": "", "arguments": ""}
+                        else:
+                            current_call_id = order[-1]
+                    partial[current_call_id]["name"] += chunk.tool_name_delta
+                if chunk.tool_arg_delta:
+                    cid = current_call_id or (order[-1] if order else None)
+                    if cid is None:
+                        continue
+                    partial[cid]["arguments"] += chunk.tool_arg_delta
+                if chunk.finish_reason:
+                    break
+        finally:
+            _stop_spinner_if_active()
 
         if text_pieces:
             self._end_text_render()

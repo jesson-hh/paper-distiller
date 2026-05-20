@@ -368,6 +368,51 @@ def _error(exc: Exception) -> dict:
 # Tool wrappers
 # ---------------------------------------------------------------------------
 
+def _run_dag_with_live(dag, ctx, renderer) -> None:
+    """Run an Orchestrator with the renderer's table painted live.
+
+    Wraps the orchestrator's `asyncio.run` in a `rich.live.Live` so the
+    user sees per-agent status table update in real time (spinner on the
+    RUNNING row, activity sub-text from CandidateRanker / PaperProcessor).
+
+    Without this wrapper, the renderer accumulates status events but never
+    paints them, leaving the user staring at a frozen prompt while tools
+    take 10-60s. With it, motion is visible.
+    """
+    from rich.console import Console
+    from rich.live import Live
+
+    console = Console()
+
+    async def _go():
+        async def _refresher():
+            while True:
+                try:
+                    live.update(renderer.build_table())
+                except Exception:
+                    pass
+                await asyncio.sleep(0.1)
+
+        with Live(
+            renderer.build_table(),
+            refresh_per_second=10,
+            console=console,
+            transient=True,
+        ) as live:
+            refresher_task = asyncio.create_task(_refresher())
+            try:
+                await Orchestrator(dag, ctx).run()
+            finally:
+                refresher_task.cancel()
+                try:
+                    await refresher_task
+                except asyncio.CancelledError:
+                    pass
+                live.update(renderer.build_table())
+
+    asyncio.run(_go())
+
+
 def _run_one_search(topic, n, source, sort, vault_path):
     """Single search pass. Returns the same shape tool_search returns
     (so tool_search can compose two passes for auto-fallback)."""
@@ -394,7 +439,7 @@ def _run_one_search(topic, n, source, sort, vault_path):
         CandidateRanker(),
     ])
     try:
-        asyncio.run(Orchestrator(dag, ctx).run())
+        _run_dag_with_live(dag, ctx, renderer)
     except Exception as e:
         cause = getattr(e, "__cause__", None) or e
         return {
@@ -541,7 +586,7 @@ def tool_distill_by_id(
             CandidateMerger(),
             CandidateRanker(),
         ])
-        asyncio.run(Orchestrator(search_dag, ctx).run())
+        _run_dag_with_live(search_dag, ctx, renderer)
 
         # Match across the full merged pool — not just the LLM-ranked subset.
         pool = ctx.shared.get("candidates", []) or []
@@ -573,7 +618,7 @@ def tool_distill_by_id(
         distill_dag = DAG([processor, VaultWriter(), SurveyComposer()])
         renderer2 = ConsoleRenderer(title=f"distill · {len(matched)} papers")
         ctx.on_status = renderer2.on_status
-        asyncio.run(Orchestrator(distill_dag, ctx).run())
+        _run_dag_with_live(distill_dag, ctx, renderer2)
 
         articles = ctx.shared.get("articles", []) or []
         out = {

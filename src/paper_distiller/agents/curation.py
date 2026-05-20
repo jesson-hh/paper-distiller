@@ -37,9 +37,19 @@ class CandidateRanker:
         candidates = ctx.shared.get("candidates", [])
         if not candidates:
             return {"ranked": []}
-        # Prefer qa_per_round (set in QA mode) over top_n (single-pass)
         top_n = ctx.cfg.qa_per_round if ctx.cfg.qa_per_round is not None else ctx.cfg.top_n
         topic = ctx.shared.get("next_query") or ctx.cfg.topic or ""
+
+        # Emit activity so users see "LLM call in progress" instead of
+        # silent stall on the long ranker call.
+        try:
+            ctx.on_status(
+                self.name,
+                activity=f"LLM rerank: {len(candidates)} candidates → top {top_n}",
+            )
+        except Exception:
+            pass
+
         ranked = await asyncio.to_thread(
             rank, candidates, topic, top_n, ctx.llm,
         )

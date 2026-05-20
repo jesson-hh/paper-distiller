@@ -31,10 +31,25 @@ class _DistillOne:
         self._wiki_index = wiki_index
 
     async def run(self, ctx: Context) -> dict:
+        title_preview = (getattr(self._paper, "title", "") or "")[:50]
         try:
+            try:
+                ctx.on_status(
+                    self.name,
+                    activity=f"PDF fetch: {self._paper.arxiv_id}",
+                )
+            except Exception:
+                pass
             full_text = await asyncio.to_thread(
                 fetch_with_fallback, self._paper, ctx.cfg, self._tmpdir,
             )
+            try:
+                ctx.on_status(
+                    self.name,
+                    activity=f"LLM distill: {title_preview}",
+                )
+            except Exception:
+                pass
             article = await asyncio.to_thread(
                 distill_article, self._paper, full_text, self._wiki_index, ctx.llm,
             )
