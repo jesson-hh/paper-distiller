@@ -23,6 +23,7 @@ dependencies = [
     "rich>=13",
     "prompt_toolkit>=3",
     "markdown>=3.5",
+    "sickle>=0.7",
     "tomli>=2.0;python_version<'3.11'",
 ]
 
