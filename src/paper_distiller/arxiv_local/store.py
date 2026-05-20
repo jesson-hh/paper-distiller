@@ -10,7 +10,18 @@ from pathlib import Path
 from typing import Iterable
 
 
-DEFAULT_DIR = Path(os.path.expanduser("~")) / ".paper-distiller" / "arxiv"
+def _default_dir() -> Path:
+    """Resolve the local mirror directory. Honors PD_ARXIV_LOCAL_DIR env so
+    tests (and air-gapped users) can point the store somewhere isolated."""
+    override = os.getenv("PD_ARXIV_LOCAL_DIR")
+    if override:
+        return Path(override)
+    return Path(os.path.expanduser("~")) / ".paper-distiller" / "arxiv"
+
+
+# Resolved at import; tests that need a fresh path should set the env
+# BEFORE importing this module (autouse conftest fixture does this).
+DEFAULT_DIR = _default_dir()
 SCHEMA_VERSION = 1
 
 
@@ -91,7 +102,12 @@ class Store:
     def __init__(self, db_path: Path | str):
         self.path = Path(db_path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self.path))
+        # check_same_thread=False — the agent's ArxivSearcher uses
+        # asyncio.to_thread to run search in a worker thread, but creates
+        # the Store on the main thread. SQLite's default cross-thread guard
+        # would raise. With WAL mode (set in _SCHEMA) concurrent reads + a
+        # single serialized writer are safe.
+        self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
         self._conn.commit()

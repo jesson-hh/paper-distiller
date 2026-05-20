@@ -178,20 +178,53 @@ def _bootstrap_kaggle(work_dir: Path, store: Store) -> IngestResult:
     return ingest_jsonl(candidates[0], store)
 
 
+def _bootstrap_oai_pmh(work_dir: Path, store: Store, since: str | None) -> IngestResult:
+    """Pull from arxiv's OAI-PMH endpoint, optionally bounded by `since` date.
+
+    No auth, no dump file — streams directly from the server in 1000-record
+    pages. `since=None` means full harvest (~6-7h, 1.7M papers). `since` set
+    to e.g. '2024-01-01' bounds it to ~2 years (~2h, ~600k papers).
+
+    work_dir is unused (we don't materialize a file) but kept for signature
+    compatibility with the other bootstrap_X helpers.
+    """
+    _ = work_dir
+    from .incremental import sync as oai_sync
+    print(
+        f"[bootstrap] starting OAI-PMH harvest "
+        f"({'from ' + since if since else 'full catalog'}); "
+        "this may take hours."
+    )
+    sync_result = oai_sync(store, since=since)
+    return IngestResult(n_inserted=sync_result.n_inserted)
+
+
 def bootstrap(
     store: Store,
     source: str = "auto",
+    since: str | None = None,
     work_dir: Path | None = None,
     keep_dump: bool = False,
 ) -> IngestResult:
-    """Run a full bootstrap. `source` ∈ auto / internet_archive / kaggle / oai_pmh."""
+    """Run a full bootstrap. `source` ∈ auto / internet_archive / kaggle / oai_pmh.
+
+    `since`: ISO date (e.g. '2024-01-01'). Only honored by `oai_pmh` source
+    — internet_archive and kaggle deliver pre-built dumps with their own
+    snapshot dates.
+
+    Default chain (`source='auto'`): try OAI-PMH first because it's the only
+    source guaranteed to work without auth and with current data. Internet
+    Archive's bulk-metadata item currently only has 2017-2018 XML dumps;
+    Kaggle requires API credentials. Both stay in the chain as last-resort
+    fallbacks for future when those paths get fixed.
+    """
     from datetime import datetime, timezone
 
     work_dir = Path(work_dir or (store.path.parent / "dump.tmp"))
     work_dir.mkdir(parents=True, exist_ok=True)
 
     sources_to_try = (
-        ["internet_archive", "kaggle"]
+        ["oai_pmh", "internet_archive", "kaggle"]
         if source == "auto"
         else [source]
     )
@@ -206,9 +239,7 @@ def bootstrap(
             elif src == "kaggle":
                 result = _bootstrap_kaggle(work_dir, store)
             elif src == "oai_pmh":
-                from .incremental import sync as oai_sync
-                sync_result = oai_sync(store, since=None)
-                result = IngestResult(n_inserted=sync_result.n_seen)
+                result = _bootstrap_oai_pmh(work_dir, store, since=since)
             else:
                 raise BootstrapError(f"unknown source: {src!r}")
             chosen = src

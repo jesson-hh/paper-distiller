@@ -43,8 +43,10 @@ def _build_arxiv_fetcher():
     if the local DB has been bootstrapped (otherwise we'd just be live-only,
     which is the v1.5 behavior — fine but explicit)."""
     from ..arxiv_local.fetcher import LocalFetcher, LiveFetcher, LocalFirstFetcher
-    from ..arxiv_local.store import DEFAULT_DIR, Store
-    store = Store(DEFAULT_DIR / "arxiv.db")
+    from ..arxiv_local.store import Store, _default_dir
+    # Re-resolve directory each call so PD_ARXIV_LOCAL_DIR env honors test
+    # isolation (autouse conftest fixture sets it per-test).
+    store = Store(_default_dir() / "arxiv.db")
     return store, LocalFirstFetcher(
         local=LocalFetcher(store),
         live=LiveFetcher(),

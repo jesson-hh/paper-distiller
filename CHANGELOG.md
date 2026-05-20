@@ -2,6 +2,18 @@
 
 All notable changes documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.6.1] — 2026-05-20
+
+### Fixed
+- **SQLite cross-thread crash** when `ArxivSearcher` ran via `asyncio.to_thread` — `Store` now opens connections with `check_same_thread=False` (safe under WAL with single-writer serialization). Without this fix, every `paper-distiller-chat` search after a non-empty local mirror would fail with `SQLite objects created in a thread can only be used in that same thread`.
+
+### Changed
+- **Bootstrap default source chain** swapped to `[oai_pmh, internet_archive, kaggle]` (was `[internet_archive, kaggle]`). The Internet Archive `arxiv-bulk-metadata` item only hosts 2017-2018 XML dumps (not the modern JSONL we expected); Kaggle requires API credentials. OAI-PMH is the only path that works out-of-the-box with no auth and current data.
+- **`paper-distiller-arxiv bootstrap --since DATE`** added. Lets you bound the OAI-PMH harvest to a specific date range — e.g. `--since 2024-01-01` pulls only the last ~2 years (~600k papers, ~2h) instead of the full 1.7M catalog (~6-7h).
+
+### Internal
+- 3 new bootstrap tests covering the new chain order + `--since` threading + full-catalog default. Total: **~365** tests passing.
+
 ## [1.6.0] — 2026-05-20
 
 ### Added — local arxiv metadata mirror (bypass arxiv API rate limits)

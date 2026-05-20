@@ -12,6 +12,21 @@ def tmp_vault(tmp_path: Path) -> Path:
 
 
 @pytest.fixture(autouse=True)
+def _isolate_arxiv_local(tmp_path_factory, monkeypatch):
+    """Point PD_ARXIV_LOCAL_DIR at an empty tmp dir for every test.
+
+    The local arxiv mirror lives at ~/.paper-distiller/arxiv/ by default —
+    a real user DB with thousands of papers can leak into integration tests
+    and change their behavior (LocalFirstFetcher takes the local path with
+    not enough results, then tries to top up via live arxiv API, hits 429).
+    Per-test isolation eliminates this cross-environment dependency.
+    """
+    isolated = tmp_path_factory.mktemp("arxiv_local_isolated")
+    monkeypatch.setenv("PD_ARXIV_LOCAL_DIR", str(isolated))
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _reset_rate_limiters():
     """Reset the module-level SourceLimiters between every test.
 

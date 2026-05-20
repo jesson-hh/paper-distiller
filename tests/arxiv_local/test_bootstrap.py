@@ -122,58 +122,25 @@ def test_ingest_skips_records_without_id_or_title(tmp_path):
     store.close()
 
 
-def test_bootstrap_auto_uses_internet_archive_first(tmp_path, mocker):
+def test_bootstrap_falls_back_through_chain(tmp_path, mocker):
+    """auto chain: oai_pmh → internet_archive → kaggle. When earlier sources
+    fail, the next is tried."""
     from paper_distiller.arxiv_local import bootstrap as bs
     from paper_distiller.arxiv_local.store import Store
 
-    def _fake_download(url, dest, timeout=600.0):
-        with open(dest, "w", encoding="utf-8") as f:
-            f.write(json.dumps(_SAMPLE_RECORD) + "\n")
-
     mocker.patch(
-        "paper_distiller.arxiv_local.bootstrap._download_to_file",
-        side_effect=_fake_download,
+        "paper_distiller.arxiv_local.bootstrap._bootstrap_oai_pmh",
+        side_effect=bs.BootstrapError("oai down"),
     )
-
-    store = Store(tmp_path / "arxiv.db")
-    # Force .gz suffix so ingest_jsonl uses gzip; OR write plain and use .json:
-    # Easier: monkey-patch the dump filename. Instead, use a plain JSONL path.
-    # We need the dump path to NOT end in .gz for our fake to work; the helper
-    # writes to arxiv-metadata.json.gz so gzip read will fail. Patch ingest path.
-    def _ia_with_plain(work_dir, store):
-        from paper_distiller.arxiv_local.bootstrap import ingest_jsonl
-        plain = work_dir / "arxiv-metadata.json"
-        with open(plain, "w", encoding="utf-8") as f:
-            f.write(json.dumps(_SAMPLE_RECORD) + "\n")
-        return ingest_jsonl(plain, store)
-
     mocker.patch(
         "paper_distiller.arxiv_local.bootstrap._bootstrap_internet_archive",
-        side_effect=_ia_with_plain,
+        side_effect=bs.BootstrapError("ia down"),
     )
-
-    result = bs.bootstrap(store, source="auto", work_dir=tmp_path / "work")
-    assert result.n_inserted >= 1
-    state = store.load_state()
-    assert state["bootstrap_source"] == "internet_archive"
-    store.close()
-
-
-def test_bootstrap_falls_back_on_internet_archive_failure(tmp_path, mocker):
-    from paper_distiller.arxiv_local import bootstrap as bs
-    from paper_distiller.arxiv_local.store import Store
-
-    def _ia_fails(work_dir, store):
-        raise bs.BootstrapError("simulated IA failure")
 
     def _fake_kaggle(work_dir, store):
         store.upsert_many([bs.parse_kaggle_record(_SAMPLE_RECORD)])
         return bs.IngestResult(n_inserted=1)
 
-    mocker.patch(
-        "paper_distiller.arxiv_local.bootstrap._bootstrap_internet_archive",
-        side_effect=_ia_fails,
-    )
     mocker.patch(
         "paper_distiller.arxiv_local.bootstrap._bootstrap_kaggle",
         side_effect=_fake_kaggle,
@@ -202,6 +169,10 @@ def test_bootstrap_all_sources_fail_raises(tmp_path, mocker):
     from paper_distiller.arxiv_local.store import Store
 
     mocker.patch(
+        "paper_distiller.arxiv_local.bootstrap._bootstrap_oai_pmh",
+        side_effect=bs.BootstrapError("oai down"),
+    )
+    mocker.patch(
         "paper_distiller.arxiv_local.bootstrap._bootstrap_internet_archive",
         side_effect=bs.BootstrapError("ia down"),
     )
@@ -214,4 +185,75 @@ def test_bootstrap_all_sources_fail_raises(tmp_path, mocker):
     import pytest
     with pytest.raises(bs.BootstrapError, match="exhausted"):
         bs.bootstrap(store, source="auto", work_dir=tmp_path / "work")
+    store.close()
+
+
+def test_bootstrap_auto_tries_oai_pmh_first(tmp_path, mocker):
+    """auto chain order: oai_pmh first (only one guaranteed without auth)."""
+    from paper_distiller.arxiv_local import bootstrap as bs
+    from paper_distiller.arxiv_local.store import Store
+
+    call_log = []
+
+    def _oai(work_dir, store, since):
+        call_log.append("oai_pmh")
+        return bs.IngestResult(n_inserted=1)
+
+    mocker.patch(
+        "paper_distiller.arxiv_local.bootstrap._bootstrap_oai_pmh",
+        side_effect=_oai,
+    )
+
+    store = Store(tmp_path / "arxiv.db")
+    bs.bootstrap(store, source="auto", work_dir=tmp_path / "work")
+    assert call_log == ["oai_pmh"]
+    assert store.load_state()["bootstrap_source"] == "oai_pmh"
+    store.close()
+
+
+def test_bootstrap_oai_pmh_honors_since(tmp_path, mocker):
+    """`since` must thread through to oai_pmh sync."""
+    from paper_distiller.arxiv_local import bootstrap as bs
+    from paper_distiller.arxiv_local.store import Store
+
+    captured = {}
+
+    def _fake_sync(store, since=None, **kwargs):
+        captured["since"] = since
+        from paper_distiller.arxiv_local.incremental import SyncResult
+        return SyncResult(n_seen=0, n_inserted=0)
+
+    mocker.patch(
+        "paper_distiller.arxiv_local.incremental.sync",
+        side_effect=_fake_sync,
+    )
+
+    store = Store(tmp_path / "arxiv.db")
+    bs.bootstrap(
+        store, source="oai_pmh", since="2024-01-01",
+        work_dir=tmp_path / "work",
+    )
+    assert captured["since"] == "2024-01-01"
+    store.close()
+
+
+def test_bootstrap_oai_pmh_since_none_means_full_catalog(tmp_path, mocker):
+    from paper_distiller.arxiv_local import bootstrap as bs
+    from paper_distiller.arxiv_local.store import Store
+
+    captured = {}
+
+    def _fake_sync(store, since=None, **kwargs):
+        captured["since"] = since
+        from paper_distiller.arxiv_local.incremental import SyncResult
+        return SyncResult(n_seen=0, n_inserted=0)
+
+    mocker.patch(
+        "paper_distiller.arxiv_local.incremental.sync",
+        side_effect=_fake_sync,
+    )
+
+    store = Store(tmp_path / "arxiv.db")
+    bs.bootstrap(store, source="oai_pmh", work_dir=tmp_path / "work")
+    assert captured["since"] is None
     store.close()

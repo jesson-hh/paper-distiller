@@ -33,13 +33,13 @@ def _cmd_bootstrap(args) -> int:
     if store.paper_count() > 0 and not args.force:
         print(
             f"Store already has {store.paper_count():,} papers. "
-            "Use --force to re-bootstrap.",
+            "Use --force to re-bootstrap, or --since <DATE> to top up via OAI.",
             file=sys.stderr,
         )
         store.close()
         return 2
     try:
-        result = bootstrap(store, source=args.source)
+        result = bootstrap(store, source=args.source, since=args.since)
     except BootstrapError as e:
         print(f"bootstrap failed: {e}", file=sys.stderr)
         store.close()
@@ -137,11 +137,21 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="paper-distiller-arxiv")
     sub = p.add_subparsers(dest="command", required=True)
 
-    b = sub.add_parser("bootstrap", help="One-time bulk download + ingest")
+    b = sub.add_parser(
+        "bootstrap",
+        help="One-time bulk download + ingest. Default chain tries OAI-PMH "
+             "first (no auth required). With --since X, only fetches papers "
+             "from date X onwards (much faster than full catalog).",
+    )
     b.add_argument(
         "--source",
         choices=["auto", "internet_archive", "kaggle", "oai_pmh"],
         default="auto",
+    )
+    b.add_argument(
+        "--since",
+        help="ISO date like '2024-01-01'. Only honored by oai_pmh source. "
+             "Omit for full catalog (~6-7h, 1.7M papers).",
     )
     b.add_argument(
         "--force", action="store_true",
