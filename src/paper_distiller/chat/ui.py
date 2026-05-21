@@ -126,6 +126,31 @@ def print_status_line(
     )
 
 
+def print_status_line_with_mode(
+    console: Console,
+    *,
+    model: str,
+    tokens_in: int,
+    tokens_out: int,
+    cost_cny: float,
+    permission_mode,
+) -> None:
+    """v1.11 status line — shows the full PermissionMode label with color.
+
+    Replaces the boolean auto_mode chip with a 5-state mode indicator.
+    """
+    from .permissions import LABELS, STATUS_COLORS, PermissionMode
+    label = LABELS.get(permission_mode, str(permission_mode))
+    color = STATUS_COLORS.get(permission_mode, "dim")
+    mode_chip = f"[{color}]{label}[/{color}]"
+    console.print(
+        f"[dim]{model}[/dim]  [dim]{DOT}[/dim]  "
+        f"[dim]{tokens_in:,} {UP_ARROW}  {tokens_out:,} {DOWN_ARROW}[/dim]  "
+        f"[dim]{DOT}[/dim]  "
+        f"[dim]¥{cost_cny:.4f}[/dim]  [dim]{DOT}[/dim]  {mode_chip}"
+    )
+
+
 def format_args_inline(arguments: dict, max_chars: int = 60) -> str:
     """Inline-format a tool-call's arguments for display.
 

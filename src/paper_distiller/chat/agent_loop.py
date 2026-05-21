@@ -17,6 +17,7 @@ asyncio.run() — see agent_tools.py.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from typing import Callable
 
@@ -145,6 +146,8 @@ class AgentLoop:
         console: Console | None = None,
         on_tool_call: Callable[[str, dict], None] | None = None,
     ):
+        from .permissions import PermissionMode
+
         self.llm = llm
         self.vault_path = vault_path
         self.max_tool_calls = max_tool_calls_per_turn
@@ -154,8 +157,16 @@ class AgentLoop:
             {"role": "system", "content": system_prompt or DEFAULT_SYSTEM_PROMPT}
         ]
         # v1.5
-        self.auto_mode = False
+        self.auto_mode = False  # kept for backward-compat with slash /auto
         self._abort = None  # set by run() when interactive
+
+        # v1.11: permission mode replaces the old auto_mode bool with an
+        # enum. auto_mode=True maps to PermissionMode.AUTO.
+        env_mode = os.getenv("PD_PERMISSION_MODE", "default")
+        from .permissions import parse_mode
+        self.permission_mode = parse_mode(env_mode) or PermissionMode.DEFAULT
+        if self.permission_mode == PermissionMode.AUTO:
+            self.auto_mode = True
 
     def send(self, user_text: str) -> str:
         """Process one user turn. Returns the final assistant text reply.
@@ -311,12 +322,24 @@ class AgentLoop:
         """
         import time
 
-        if (
-            not getattr(self, "auto_mode", False)
-            and should_show_plan(tc.name, tc.arguments)
-        ):
+        # v1.11: permission_mode dictates whether to show plan-mode preview.
+        # DEFAULT respects the cost threshold; PLAN / SAFE always show;
+        # AUTO / BYPASS always skip.
+        from .permissions import (
+            should_show_plan_for_mode, confirm_timeout_seconds,
+        )
+        threshold = float(os.getenv("PD_PLAN_THRESHOLD_CNY", "10.0"))
+        show_plan = should_show_plan_for_mode(
+            self.permission_mode, tc.name, tc.arguments, threshold,
+        )
+        if show_plan:
             est = estimate_tool_cost_cny(tc.name, tc.arguments)
-            if not confirm_plan(tc.name, tc.arguments, estimated_cost_cny=est):
+            countdown = confirm_timeout_seconds(self.permission_mode, default=5)
+            if not confirm_plan(
+                tc.name, tc.arguments,
+                estimated_cost_cny=est,
+                countdown_sec=countdown,
+            ):
                 self.messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
@@ -351,22 +374,51 @@ class AgentLoop:
         })
 
     def run(self) -> int:
-        """Blocking interactive loop. Streaming + slash + plan-mode aware."""
+        """Blocking interactive loop. Streaming + slash + plan-mode aware.
+
+        v1.11: uses prompt_toolkit.PromptSession for ↑/↓ history navigation,
+        draft preservation, and ESC handling. History persisted to
+        ~/.paper-distiller/history.jsonl.
+        """
         from .. import __version__
         from .abort import AbortController, install_handler
+        from .history import InputHistory
         from .slash_commands import parse_slash, dispatch_slash, EXIT_SIGNAL
         from .ui import PROMPT
+
+        # prompt_toolkit setup — gives us arrow-key history + ESC handling
+        from prompt_toolkit import PromptSession
+        from prompt_toolkit.history import InMemoryHistory
+        from prompt_toolkit.formatted_text import ANSI
 
         print_welcome_banner(
             self.console,
             version=__version__,
             vault_path=self.vault_path,
             model=self.llm.model,
-            auto_mode=self.auto_mode,
+            auto_mode=(self.permission_mode.value),
         )
 
         self._abort = AbortController()
         uninstall = install_handler(self._abort)
+
+        # Build prompt session with persisted history
+        input_hist = InputHistory()
+        pt_hist = InMemoryHistory()
+        # Prime in-memory history (oldest first so ↑ first press picks newest)
+        for display in reversed(list(input_hist.all_displays_newest_first())):
+            try:
+                pt_hist.append_string(display)
+            except Exception:
+                pass
+
+        # ANSI-escaped cyan prompt (prompt_toolkit doesn't render rich markup)
+        prompt_text = ANSI("\x1b[1;36m" + PROMPT + "\x1b[0m ")
+        session = PromptSession(
+            history=pt_hist,
+            enable_history_search=True,
+            mouse_support=False,
+        )
 
         try:
             while True:
@@ -376,11 +428,7 @@ class AgentLoop:
                 self._abort.reset()
 
                 try:
-                    # Bright cyan prompt chip — Claude Code-style
-                    self.console.print(
-                        f"[bold cyan]{PROMPT}[/bold cyan] ", end=""
-                    )
-                    line = input().strip()
+                    line = session.prompt(prompt_text).strip()
                 except EOFError:
                     self.console.print("\n[dim]再见。[/dim]")
                     return 0
@@ -400,6 +448,13 @@ class AgentLoop:
                         return 0
                     print_slash_output(self.console, out)
                     continue
+
+                # Persist non-slash inputs to history (slash commands skipped
+                # automatically by InputHistory.append).
+                try:
+                    input_hist.append(line)
+                except Exception:
+                    pass
 
                 try:
                     self.console.print()
@@ -425,13 +480,15 @@ class AgentLoop:
                     continue
 
                 self.console.print()
-                print_status_line(
+                # v1.11: status line shows permission_mode (was just auto bool)
+                from .ui import print_status_line_with_mode
+                print_status_line_with_mode(
                     self.console,
                     model=self.llm.model,
                     tokens_in=self.llm.total_tokens_in,
                     tokens_out=self.llm.total_tokens_out,
                     cost_cny=self.llm.estimated_cost_cny,
-                    auto_mode=self.auto_mode,
+                    permission_mode=self.permission_mode,
                 )
                 self.console.print()
         finally:

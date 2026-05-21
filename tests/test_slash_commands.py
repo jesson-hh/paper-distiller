@@ -127,10 +127,62 @@ def test_exit_signals_quit(tmp_path):
 
 def test_auto_toggles_loop_flag(tmp_path):
     from paper_distiller.chat.slash_commands import dispatch_slash
+    from paper_distiller.chat.permissions import PermissionMode
 
     loop = _fake_loop(tmp_path)
+    loop.permission_mode = PermissionMode.DEFAULT
     loop.auto_mode = False
     dispatch_slash("auto", [], loop)
+    assert loop.permission_mode == PermissionMode.AUTO
     assert loop.auto_mode is True
     dispatch_slash("auto", [], loop)
+    assert loop.permission_mode == PermissionMode.DEFAULT
     assert loop.auto_mode is False
+
+
+def test_mode_no_args_shows_current_and_options(tmp_path):
+    from paper_distiller.chat.slash_commands import dispatch_slash
+    from paper_distiller.chat.permissions import PermissionMode
+
+    loop = _fake_loop(tmp_path)
+    loop.permission_mode = PermissionMode.DEFAULT
+    out = dispatch_slash("mode", [], loop)
+    assert "default" in out
+    assert "auto" in out
+    assert "bypass" in out
+    assert "plan" in out
+    assert "safe" in out
+
+
+def test_mode_switches_to_valid(tmp_path):
+    from paper_distiller.chat.slash_commands import dispatch_slash
+    from paper_distiller.chat.permissions import PermissionMode
+
+    loop = _fake_loop(tmp_path)
+    loop.permission_mode = PermissionMode.DEFAULT
+    out = dispatch_slash("mode", ["plan"], loop)
+    assert loop.permission_mode == PermissionMode.PLAN
+    assert "plan" in out
+
+
+def test_mode_rejects_invalid(tmp_path):
+    from paper_distiller.chat.slash_commands import dispatch_slash
+    from paper_distiller.chat.permissions import PermissionMode
+
+    loop = _fake_loop(tmp_path)
+    loop.permission_mode = PermissionMode.DEFAULT
+    out = dispatch_slash("mode", ["nonsense"], loop)
+    # Mode unchanged
+    assert loop.permission_mode == PermissionMode.DEFAULT
+    assert "unknown" in out.lower()
+
+
+def test_mode_bypass_sets_auto_mode_compat(tmp_path):
+    """bypass mode should keep auto_mode=True for legacy code paths."""
+    from paper_distiller.chat.slash_commands import dispatch_slash
+    from paper_distiller.chat.permissions import PermissionMode
+
+    loop = _fake_loop(tmp_path)
+    dispatch_slash("mode", ["bypass"], loop)
+    assert loop.permission_mode == PermissionMode.BYPASS
+    assert loop.auto_mode is True

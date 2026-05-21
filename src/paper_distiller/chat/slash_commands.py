@@ -55,7 +55,9 @@ def _cmd_help(args, loop) -> str:
         "  /show <slug> [cat]  read a vault entry (default category: articles)",
         "  /history          list 10 most recent vault entries",
         "  /exit, /quit      leave the REPL",
-        "  /auto             toggle auto-mode (skip plan-mode previews)",
+        "  /auto             toggle between default ↔ auto permission mode",
+        "  /mode [name]      view/switch permission mode "
+        "(default, auto, bypass, plan, safe)",
     ]
     return "\n".join(lines)
 
@@ -97,9 +99,44 @@ def _cmd_exit(args, loop) -> str:
 
 
 def _cmd_auto(args, loop) -> str:
-    loop.auto_mode = not getattr(loop, "auto_mode", False)
-    state = "on" if loop.auto_mode else "off"
-    return f"auto-mode: {state} (skips plan-mode previews when on)"
+    """Legacy /auto — toggles between DEFAULT and AUTO permission modes."""
+    from .permissions import PermissionMode
+    cur = getattr(loop, "permission_mode", PermissionMode.DEFAULT)
+    if cur == PermissionMode.AUTO:
+        loop.permission_mode = PermissionMode.DEFAULT
+        loop.auto_mode = False
+        return "permission_mode: default (plan-mode previews enabled)"
+    else:
+        loop.permission_mode = PermissionMode.AUTO
+        loop.auto_mode = True
+        return "permission_mode: auto (plan-mode previews skipped)"
+
+
+def _cmd_mode(args, loop) -> str:
+    """/mode <name> — switch permission mode. /mode without arg shows current."""
+    from .permissions import PermissionMode, parse_mode, LABELS
+    if not args:
+        cur = getattr(loop, "permission_mode", PermissionMode.DEFAULT)
+        names = ", ".join(m.value for m in PermissionMode)
+        return (
+            f"current permission_mode: {cur.value}\n"
+            f"available modes: {names}\n"
+            f"\n"
+            f"  default     show plan-mode preview for tools >= ¥10 (default threshold)\n"
+            f"  auto        skip plan-mode previews entirely\n"
+            f"  bypass      same as auto (reserved for future destructive-op gates)\n"
+            f"  plan        always show plan preview, no auto-proceed timeout\n"
+            f"  safe        like plan, but at ¥0 threshold (every tool prompts)\n"
+            f"\n"
+            f"usage: /mode <name>"
+        )
+    target = parse_mode(args[0])
+    if target is None:
+        names = ", ".join(m.value for m in PermissionMode)
+        return f"unknown mode {args[0]!r}; available: {names}"
+    loop.permission_mode = target
+    loop.auto_mode = (target == PermissionMode.AUTO or target == PermissionMode.BYPASS)
+    return f"permission_mode → {target.value}"
 
 
 HANDLERS: dict[str, Callable] = {
@@ -111,6 +148,7 @@ HANDLERS: dict[str, Callable] = {
     "exit": _cmd_exit,
     "quit": _cmd_exit,
     "auto": _cmd_auto,
+    "mode": _cmd_mode,
 }
 
 

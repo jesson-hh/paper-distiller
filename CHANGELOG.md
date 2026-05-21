@@ -2,6 +2,41 @@
 
 All notable changes documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.11.0] — 2026-05-21
+
+### Added — Claude Code-style interactive shell upgrades
+
+Adopted 5 UX patterns from Claude Code's source code:
+
+- **Persistent input history**: `~/.paper-distiller/history.jsonl` stores every
+  natural-language prompt (slash commands skipped). Max 2000 entries, auto-truncated.
+  Override path via `PD_HISTORY_FILE`. New module `chat/history.py`.
+- **↑ / ↓ arrow-key navigation**: replaced raw `input()` with `prompt_toolkit.PromptSession`.
+  Cycles through past prompts (across sessions), preserves draft text when navigating away.
+  Supports Ctrl-R reverse-search through history.
+- **5 permission modes** (replacing the old `auto_mode: bool`):
+  - `default` — show plan-mode preview for tools ≥ ¥10 (env-configurable threshold)
+  - `auto` — skip plan-mode previews entirely
+  - `bypass` — same as auto (reserved for future destructive-op gates)
+  - `plan` — ALWAYS show plan preview, no auto-proceed timeout (must explicitly confirm)
+  - `safe` — like plan, but every tool prompts (¥0 threshold; max caution)
+- **`/mode [name]` slash command**: view current or switch to any of the 5 modes.
+  Mode is shown in the per-turn status line with color coding (bypass=red, safe=green, plan=cyan, auto=yellow, default=dim).
+- **`PD_PERMISSION_MODE` env**: set startup mode (e.g. `PD_PERMISSION_MODE=plan` for cautious first-time use).
+
+### Internal
+
+- New modules: `chat/history.py`, `chat/permissions.py`.
+- `print_status_line_with_mode` in `chat/ui.py` replaces the old 2-state auto chip.
+- `agent_loop.py` uses `prompt_toolkit` for input (already a dependency; just unused).
+- `slash_commands.py` adds `_cmd_mode` handler; `_cmd_auto` now toggles between DEFAULT/AUTO via permission_mode.
+- **+20 new tests** (10 history + 11 permissions + 5 slash mode tests, some replaced). Total: **431** (was 411).
+
+### Backward compatibility
+
+- `loop.auto_mode` boolean preserved as a derived view of `permission_mode == AUTO | BYPASS`. Legacy callers / tests work unchanged.
+- `/auto` still works — now equivalent to `/mode auto` ↔ `/mode default`.
+
 ## [1.10.0] — 2026-05-21
 
 ### Added — `find_proof` agent tool (7th LLM-callable tool)

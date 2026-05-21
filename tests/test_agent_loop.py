@@ -555,7 +555,9 @@ def test_send_skips_plan_mode_in_auto_mode(mocker, tmp_path):
         return_value={"session_id": "x"},
     )
 
+    from paper_distiller.chat.permissions import PermissionMode
     loop = AgentLoop(llm=_LLM(), vault_path=str(tmp_path))
+    loop.permission_mode = PermissionMode.AUTO
     loop.auto_mode = True
     loop.send("研究")
     confirm.assert_not_called()
