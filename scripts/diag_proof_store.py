@@ -108,14 +108,37 @@ def main():
     print(f"  techniques: {proof_store.technique_count()}")
     print(f"  techniques sample: {[t.name for t in proof_store.list_techniques(8)]}")
 
-    # Second paper — should get RAG injection
-    # Use technique candidates from paper_b's abstract
-    from paper_distiller.agents.processor import _extract_candidate_techniques
-    candidates_b = _extract_candidate_techniques(paper_b)
-    print(f"\n--- candidate techniques for paper B ---")
-    print(f"  abstract keyword hits: {candidates_b}")
-    prior = proof_store.retrieve_relevant(candidates_b)
-    print(f"  retrieved prior theorems: {len(prior)}")
+    # Second paper — should get RAG injection via v1.9 three-way retrieval
+    from paper_distiller.agents.processor import (
+        _extract_candidate_techniques,
+        _gather_candidate_techniques,
+    )
+    print(f"\n--- v1.9 three-way candidate gathering for paper B ---")
+    hardcoded = _extract_candidate_techniques(paper_b)
+    print(f"  A.1 hardcoded keyword hits: {len(hardcoded)}: {hardcoded}")
+
+    candidates_all = _gather_candidate_techniques(paper_b, proof_store, llm=llm)
+    print(f"  A+C combined (hardcoded + store-known + LLM extract): {len(candidates_all)}")
+    print(f"    sample: {candidates_all[:8]}")
+
+    print(f"\n--- Strategy B (FTS5 text match on abstract) ---")
+    text = (paper_b.title or "") + " " + (paper_b.abstract or "")
+    text_hits = proof_store.retrieve_by_text_match(text, limit=6)
+    print(f"  text-match hits: {len(text_hits)}")
+    for t in text_hits[:3]:
+        print(f"    - {t.name} ({t.paper_arxiv_id})")
+
+    print(f"\n--- merged 3-way result ---")
+    by_tech = proof_store.retrieve_relevant(candidates_all)
+    seen_ids = set()
+    prior = []
+    for thm in by_tech + text_hits:
+        if thm.id and thm.id not in seen_ids:
+            seen_ids.add(thm.id)
+            prior.append(thm)
+    print(f"  technique-based: {len(by_tech)}")
+    print(f"  text-match-based: {len(text_hits)}")
+    print(f"  merged (deduped): {len(prior)}")
 
     art_b = _distill_one(paper_b, cfg, llm, proof_store, prior_theorems=prior)
 

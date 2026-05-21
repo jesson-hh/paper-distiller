@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 def test_tool_schemas_valid():
     from paper_distiller.chat.agent_tools import TOOL_SCHEMAS
 
-    assert len(TOOL_SCHEMAS) == 6
+    assert len(TOOL_SCHEMAS) == 7
     for schema in TOOL_SCHEMAS:
         assert schema["type"] == "function"
         fn = schema["function"]
@@ -28,7 +28,10 @@ def test_tool_schemas_distinct_names():
     from paper_distiller.chat.agent_tools import TOOL_SCHEMAS
 
     names = [s["function"]["name"] for s in TOOL_SCHEMAS]
-    assert set(names) == {"search", "distill_by_id", "show", "ask", "research", "ask_user"}
+    assert set(names) == {
+        "search", "distill_by_id", "show", "ask", "research",
+        "ask_user", "find_proof",
+    }
     assert len(names) == len(set(names))  # no duplicates
 
 
@@ -37,7 +40,8 @@ def test_tool_schemas_order_matches_spec():
 
     names_in_order = [s["function"]["name"] for s in TOOL_SCHEMAS]
     assert names_in_order == [
-        "search", "distill_by_id", "show", "ask", "research", "ask_user",
+        "search", "distill_by_id", "show", "ask", "research",
+        "ask_user", "find_proof",
     ]
 
 
@@ -501,6 +505,136 @@ def test_ask_user_invalid_then_valid(monkeypatch, tmp_path):
         vault_path=str(tmp_path),
     )
     assert result == {"selected": ["A"], "cancelled": False}
+
+
+# ---------------------------------------------------------------------------
+# tool_find_proof (v1.10 — query the per-vault ProofStore from chat)
+# ---------------------------------------------------------------------------
+
+def _seed_proof_store(vault_path):
+    """Helper: open the vault's proof store and seed it with 2 theorems."""
+    from paper_distiller.proofs.store import open_for_vault, ProofSidecar
+    store = open_for_vault(vault_path)
+    store.ingest_sidecar(
+        ProofSidecar(
+            theorems=[{
+                "name": "Theorem A1",
+                "statement": "By Bernstein concentration, x <= C.",
+                "proof_sketch": "Apply MGF bound.",
+                "techniques_used": ["Bernstein", "MGF"],
+            }],
+            key_techniques=["Bernstein", "MGF"],
+        ),
+        "arxiv:2110.12319", paper_slug="paper-a",
+    )
+    store.ingest_sidecar(
+        ProofSidecar(
+            theorems=[{
+                "name": "Lemma B1",
+                "statement": "Wasserstein-1 duality via Kantorovich.",
+                "proof_sketch": "Convex duality.",
+                "techniques_used": ["Wasserstein", "Kantorovich"],
+            }],
+            key_techniques=["Wasserstein", "Kantorovich"],
+        ),
+        "arxiv:2204.99999", paper_slug="paper-b",
+    )
+    store.close()
+
+
+def test_find_proof_stats_on_empty_vault(tmp_path):
+    from paper_distiller.chat.agent_tools import tool_find_proof
+    result = tool_find_proof("stats", vault_path=str(tmp_path))
+    assert result == {"theorems": 0, "techniques": 0, "papers_covered": 0}
+
+
+def test_find_proof_stats_after_ingest(tmp_path):
+    from paper_distiller.chat.agent_tools import tool_find_proof
+    _seed_proof_store(tmp_path)
+    result = tool_find_proof("stats", vault_path=str(tmp_path))
+    assert result["theorems"] == 2
+    assert result["techniques"] == 4
+    assert result["papers_covered"] == 2
+
+
+def test_find_proof_list_techniques(tmp_path):
+    from paper_distiller.chat.agent_tools import tool_find_proof
+    _seed_proof_store(tmp_path)
+    result = tool_find_proof("list_techniques", limit=10, vault_path=str(tmp_path))
+    names = {t["name"] for t in result["techniques"]}
+    assert names == {"Bernstein", "MGF", "Wasserstein", "Kantorovich"}
+
+
+def test_find_proof_by_technique(tmp_path):
+    from paper_distiller.chat.agent_tools import tool_find_proof
+    _seed_proof_store(tmp_path)
+    result = tool_find_proof(
+        "by_technique", query="Bernstein", vault_path=str(tmp_path),
+    )
+    assert len(result["theorems"]) == 1
+    assert result["theorems"][0]["name"] == "Theorem A1"
+    assert "Bernstein" in result["theorems"][0]["techniques_used"]
+
+
+def test_find_proof_by_text(tmp_path):
+    from paper_distiller.chat.agent_tools import tool_find_proof
+    _seed_proof_store(tmp_path)
+    result = tool_find_proof(
+        "by_text", query="Kantorovich duality", vault_path=str(tmp_path),
+    )
+    assert len(result["theorems"]) >= 1
+    assert any("Wasserstein" in t["statement"] for t in result["theorems"])
+
+
+def test_find_proof_by_paper(tmp_path):
+    from paper_distiller.chat.agent_tools import tool_find_proof
+    _seed_proof_store(tmp_path)
+    result = tool_find_proof(
+        "by_paper", query="arxiv:2110.12319", vault_path=str(tmp_path),
+    )
+    assert len(result["theorems"]) == 1
+    assert result["theorems"][0]["paper_slug"] == "paper-a"
+
+
+def test_find_proof_missing_query_returns_error(tmp_path):
+    """by_technique / by_text / by_paper all require query."""
+    from paper_distiller.chat.agent_tools import tool_find_proof
+    _seed_proof_store(tmp_path)
+    result = tool_find_proof(
+        "by_technique", query=None, vault_path=str(tmp_path),
+    )
+    assert "error" in result
+
+
+def test_find_proof_unknown_query_type_returns_error(tmp_path):
+    from paper_distiller.chat.agent_tools import tool_find_proof
+    _seed_proof_store(tmp_path)
+    result = tool_find_proof(
+        "by_nothing", query="x", vault_path=str(tmp_path),
+    )
+    assert "error" in result
+    assert "unknown query_type" in result["error"]
+
+
+def test_find_proof_no_match_returns_empty(tmp_path):
+    from paper_distiller.chat.agent_tools import tool_find_proof
+    _seed_proof_store(tmp_path)
+    result = tool_find_proof(
+        "by_technique", query="QuantumGravity",
+        vault_path=str(tmp_path),
+    )
+    assert result == {"theorems": []}
+
+
+def test_find_proof_in_execute_tool_dispatch(tmp_path):
+    """execute_tool should route 'find_proof' correctly."""
+    from paper_distiller.chat.agent_tools import execute_tool
+    _seed_proof_store(tmp_path)
+    result = execute_tool(
+        "find_proof", {"query_type": "stats"},
+        vault_path=str(tmp_path),
+    )
+    assert result["theorems"] == 2
 
 
 def test_ask_user_in_execute_tool_dispatch(mocker, tmp_path):

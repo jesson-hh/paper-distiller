@@ -52,6 +52,7 @@ __all__ = [
     "tool_ask",
     "tool_research",
     "tool_ask_user",
+    "tool_find_proof",
 ]
 
 
@@ -284,6 +285,64 @@ _RESEARCH_SCHEMA = {
 }
 
 
+_FIND_PROOF_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "find_proof",
+        "description": (
+            "Query the vault's accumulated proof / theorem knowledge base. "
+            "Use when the user asks 'which papers use X technique?', "
+            "'find theorems about Wasserstein', 'show all known techniques', "
+            "etc. The knowledge base accumulates as papers are distilled "
+            "(each deep distillation extracts a proof sidecar). Empty for "
+            "fresh vaults — call once and check `stats` if unsure."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query_type": {
+                    "type": "string",
+                    "enum": [
+                        "by_technique",
+                        "by_text",
+                        "by_paper",
+                        "list_techniques",
+                        "stats",
+                    ],
+                    "description": (
+                        "Query mode:\n"
+                        "- 'by_technique': find theorems using a specific named "
+                        "technique like 'Hölder' or 'Bernstein'. Pass the "
+                        "technique name in `query`.\n"
+                        "- 'by_text': FTS5 search over theorem statements + "
+                        "proof sketches. Pass search keywords in `query`.\n"
+                        "- 'by_paper': list theorems from a specific paper. "
+                        "Pass the arxiv_id in `query`.\n"
+                        "- 'list_techniques': list all canonical technique "
+                        "names the vault has learned. No `query` needed.\n"
+                        "- 'stats': summary stats (theorem count, technique "
+                        "count, papers covered). No `query` needed."
+                    ),
+                },
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "Technique name, search keywords, or arxiv_id — "
+                        "depends on `query_type`. Omit for list_techniques / stats."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max results to return (default 10).",
+                    "default": 10,
+                },
+            },
+            "required": ["query_type"],
+        },
+    },
+}
+
+
 _ASK_USER_SCHEMA = {
     "type": "function",
     "function": {
@@ -346,6 +405,7 @@ TOOL_SCHEMAS: list = [
     _ASK_SCHEMA,
     _RESEARCH_SCHEMA,
     _ASK_USER_SCHEMA,
+    _FIND_PROOF_SCHEMA,
 ]
 
 
@@ -802,6 +862,76 @@ def tool_ask_user(
         return _error(e)
 
 
+def tool_find_proof(
+    query_type: str,
+    query: str | None = None,
+    limit: int = 10,
+    *,
+    vault_path: str,
+) -> dict:
+    """Query the vault's accumulated proof / theorem knowledge base.
+
+    Returns a JSON-serializable result dict. Never raises — returns
+    {'error': ...} on bad input or store issues.
+    """
+    try:
+        from pathlib import Path
+        from ..proofs.store import open_for_vault
+
+        store = open_for_vault(Path(vault_path))
+        try:
+            if query_type == "stats":
+                return {
+                    "theorems": store.theorem_count(),
+                    "techniques": store.technique_count(),
+                    "papers_covered": store.paper_count(),
+                }
+
+            if query_type == "list_techniques":
+                techs = store.list_techniques(limit=max(1, min(500, limit)))
+                return {
+                    "techniques": [
+                        {
+                            "name": t.name,
+                            "first_seen_arxiv_id": t.first_seen_arxiv_id,
+                        }
+                        for t in techs
+                    ],
+                }
+
+            if not query or not query.strip():
+                return {"error": f"query_type={query_type!r} requires `query`"}
+
+            n = max(1, min(50, limit))
+
+            if query_type == "by_technique":
+                results = store.theorems_using_technique(query, limit=n)
+            elif query_type == "by_text":
+                results = store.search_theorems(query, limit=n)
+            elif query_type == "by_paper":
+                results = store.theorems_by_paper(query)[:n]
+            else:
+                return {"error": f"unknown query_type: {query_type!r}"}
+
+            return {
+                "theorems": [
+                    {
+                        "name": t.name,
+                        "statement": t.statement,
+                        "proof_sketch": t.proof_sketch,
+                        "techniques_used": t.techniques_used,
+                        "paper_arxiv_id": t.paper_arxiv_id,
+                        "paper_slug": t.paper_slug,
+                    }
+                    for t in results
+                ],
+            }
+        finally:
+            store.close()
+    except Exception as e:
+        return _error(e)
+
+
 TOOL_FUNCTIONS: dict[str, Callable] = {
     "search": tool_search,
     "distill_by_id": tool_distill_by_id,
@@ -809,6 +939,7 @@ TOOL_FUNCTIONS: dict[str, Callable] = {
     "ask": tool_ask,
     "research": tool_research,
     "ask_user": tool_ask_user,
+    "find_proof": tool_find_proof,
 }
 
 

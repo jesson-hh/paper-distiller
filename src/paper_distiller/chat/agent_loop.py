@@ -72,6 +72,17 @@ DEFAULT_SYSTEM_PROMPT = """\
 **关键判断模糊时**调用：让用户从 2-4 个选项中挑。比如 search 返回 10 篇候选你不知该蒸馏哪几篇、\
 或者预算紧时让用户确认走 ask 还是 research。**不要**用于琐碎确认，agent 自己能决策的就别问。
 
+7. **find_proof(query_type, query=None, limit=10)** — 查 vault 累积的定理 / 技术知识库。\
+v1.8 起每篇蒸馏会抽出 proof_sidecar（定理 + 证明 sketch + 技术名），存进 `.proof_store/`。\
+- `query_type="stats"`: 看知识库大小（theorems / techniques / papers）
+- `query_type="list_techniques"`: 列所有学过的规范技术名
+- `query_type="by_technique"`, `query="Bernstein"`: 找用了 Bernstein 不等式的所有定理
+- `query_type="by_text"`, `query="symmetrization"`: FTS5 全文搜定理 statement
+- `query_type="by_paper"`, `query="2110.12319"`: 列某篇 paper 抽出的定理
+
+**何时调用**：用户问"vault 里有哪些定理用了 X"、"找跟 Y 相关的证明"、"知识库现在有多大"等。\
+**先调一次 `stats`** 看看知识库非空再继续——空 vault 没必要查。
+
 ## 工作原则
 
 - **遇真模糊调用 ask_user**：决定明显该由用户做（选哪些论文、是否提高预算、方向有歧义）就暂停问。\

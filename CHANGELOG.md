@@ -2,6 +2,40 @@
 
 All notable changes documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.10.0] — 2026-05-21
+
+### Added — `find_proof` agent tool (7th LLM-callable tool)
+
+Exposes the v1.8 + v1.9 proof / theorem knowledge base to the conversational
+agent. The agent can now answer questions like "which papers in my vault use
+Bernstein's inequality?" by calling a structured tool instead of guessing.
+
+`find_proof(query_type, query, limit=10)` — 5 query modes:
+
+| query_type | what it does | query field |
+|---|---|---|
+| `stats` | theorems / techniques / papers covered counts | (none) |
+| `list_techniques` | every canonical technique name the vault learned | (none) |
+| `by_technique` | theorems indexed by a specific technique name | technique, e.g. "Hölder" |
+| `by_text` | FTS5 search over theorem statements + proof sketches | search keywords |
+| `by_paper` | all theorems extracted from a specific paper | arxiv_id |
+
+System prompt updated to teach the LLM when to call `find_proof` and to
+suggest calling `stats` first on potentially empty vaults.
+
+### Internal
+
+- New schema `_FIND_PROOF_SCHEMA` + wrapper `tool_find_proof` in `chat/agent_tools.py`.
+- Returns JSON-serializable dicts only (theorems list with name/statement/proof_sketch/techniques_used/paper_arxiv_id/paper_slug).
+- Defensive: returns `{"error": ...}` on bad input or store errors instead of raising.
+- **+10 new tests** covering all 5 query modes + error paths. Total: **411** (was 401).
+
+### Backward compatibility
+
+- Adds tool #7 without touching the existing 6.
+- Empty vault → tool still works, returns 0-count stats / empty lists rather than erroring.
+- Tools count assertions in agent_loop tests updated from 6 → 7.
+
 ## [1.9.0] — 2026-05-21
 
 ### Added — three-way RAG retrieval for proof context
