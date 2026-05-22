@@ -298,7 +298,9 @@ _FIND_PROOF_SCHEMA = {
             "'find theorems about Wasserstein', 'show all known techniques', "
             "etc. The knowledge base accumulates as papers are distilled "
             "(each deep distillation extracts a proof sidecar). Empty for "
-            "fresh vaults — call once and check `stats` if unsure."
+            "fresh vaults — call once and check `stats` if unsure. "
+            "When PD_GRAPH_DEPTH is set, graph queries (by_step / "
+            "dependency_walk / node) are also available over the step-level DAG."
         ),
         "parameters": {
             "type": "object",
@@ -311,6 +313,9 @@ _FIND_PROOF_SCHEMA = {
                         "by_paper",
                         "list_techniques",
                         "stats",
+                        "by_step",
+                        "dependency_walk",
+                        "node",
                     ],
                     "description": (
                         "Query mode:\n"
@@ -324,7 +329,14 @@ _FIND_PROOF_SCHEMA = {
                         "- 'list_techniques': list all canonical technique "
                         "names the vault has learned. No `query` needed.\n"
                         "- 'stats': summary stats (theorem count, technique "
-                        "count, papers covered). No `query` needed."
+                        "count, papers covered). No `query` needed.\n"
+                        "- 'by_step': FTS5 search over proof-graph node text / "
+                        "source quotes. Pass keywords in `query`.\n"
+                        "- 'dependency_walk': return all nodes the given node "
+                        "transitively depends on. Pass node id (int as string) "
+                        "in `query`.\n"
+                        "- 'node': return a single node + its out-edges. Pass "
+                        "node id (int as string) in `query`."
                     ),
                 },
                 "query": {
@@ -949,6 +961,66 @@ def tool_find_proof(
                 results = store.search_theorems(query, limit=n)
             elif query_type == "by_paper":
                 results = store.theorems_by_paper(query)[:n]
+            elif query_type == "by_step":
+                nodes = store.search_nodes(query, limit=n)
+                return {
+                    "nodes": [
+                        {
+                            "id": nd.id,
+                            "kind": nd.kind,
+                            "label": nd.label,
+                            "text": nd.text,
+                            "status": nd.status,
+                            "paper_arxiv_id": nd.paper_arxiv_id,
+                            "techniques": nd.techniques,
+                        }
+                        for nd in nodes
+                    ],
+                }
+            elif query_type == "dependency_walk":
+                try:
+                    node_id = int(query)
+                except (ValueError, TypeError):
+                    return {"error": f"dependency_walk requires a numeric node id in `query`; got {query!r}"}
+                walked = store.dependency_walk(node_id, max_nodes=n)
+                return {
+                    "nodes": [
+                        {
+                            "id": nd.id,
+                            "kind": nd.kind,
+                            "label": nd.label,
+                            "text": nd.text,
+                            "status": nd.status,
+                            "paper_arxiv_id": nd.paper_arxiv_id,
+                            "techniques": nd.techniques,
+                        }
+                        for nd in walked
+                    ],
+                }
+            elif query_type == "node":
+                try:
+                    node_id = int(query)
+                except (ValueError, TypeError):
+                    return {"error": f"node requires a numeric node id in `query`; got {query!r}"}
+                nd = store.get_node(node_id)
+                if nd is None:
+                    return {"error": f"node id {node_id} not found"}
+                edges = store.out_edges(node_id)
+                return {
+                    "node": {
+                        "id": nd.id,
+                        "kind": nd.kind,
+                        "label": nd.label,
+                        "text": nd.text,
+                        "status": nd.status,
+                        "paper_arxiv_id": nd.paper_arxiv_id,
+                        "techniques": nd.techniques,
+                    },
+                    "edges": [
+                        {"src_id": e.src_id, "dst_id": e.dst_id, "rel": e.rel}
+                        for e in edges
+                    ],
+                }
             else:
                 return {"error": f"unknown query_type: {query_type!r}"}
 
