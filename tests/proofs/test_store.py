@@ -319,3 +319,20 @@ def test_search_nodes_and_by_technique(tmp_path):
     by_tech = store.nodes_using_technique("Hölder")
     assert len(by_tech) == 1 and "Hölder" in by_tech[0].text
     store.close()
+
+
+def test_dependency_walk(tmp_path):
+    from paper_distiller.proofs.store import ProofStore, Node, Edge
+    store = ProofStore(tmp_path / "proofs.db")
+    thm = store.add_node(Node(paper_arxiv_id="p", kind="theorem", text="T"))
+    s2 = store.add_node(Node(paper_arxiv_id="p", kind="proof_step", text="step2"))
+    s1 = store.add_node(Node(paper_arxiv_id="p", kind="proof_step", text="step1"))
+    store.add_edge(Edge(src_id=thm, dst_id=s2, rel="depends_on"))
+    store.add_edge(Edge(src_id=s2,  dst_id=s1, rel="depends_on"))
+    walked = store.dependency_walk(thm)
+    walked_ids = [n.id for n in walked]
+    assert walked_ids == [s2, s1]  # transitive deps, BFS order, excludes the root
+    # Cycle safety: add a back-edge and ensure it still terminates.
+    store.add_edge(Edge(src_id=s1, dst_id=thm, rel="depends_on"))
+    assert len(store.dependency_walk(thm)) <= 3
+    store.close()

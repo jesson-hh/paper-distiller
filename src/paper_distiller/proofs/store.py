@@ -396,6 +396,24 @@ class ProofStore:
         ).fetchall()
         return [self._row_to_node(r) for r in rows]
 
+    def dependency_walk(
+        self, node_id: int, rel: str = "depends_on", max_nodes: int = 500,
+    ) -> list[Node]:
+        """Breadth-first transitive closure following `rel` edges out of node_id.
+        Excludes the root. Cycle-safe (visited set), capped at max_nodes."""
+        from collections import deque
+        seen: set[int] = {node_id}
+        order: list[int] = []
+        queue: deque[int] = deque([node_id])
+        while queue and len(order) < max_nodes:
+            cur = queue.popleft()
+            for e in self.out_edges(cur, rel):
+                if e.dst_id not in seen:
+                    seen.add(e.dst_id)
+                    order.append(e.dst_id)
+                    queue.append(e.dst_id)
+        return [n for n in (self.get_node(i) for i in order) if n is not None]
+
     # ------------------------------------------------------------------
     # Ingestion
     # ------------------------------------------------------------------
