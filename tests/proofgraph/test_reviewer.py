@@ -37,6 +37,55 @@ class _StubLLM:
         return self._response
 
 
+class _RecordingLLM:
+    """Captures the prompt text passed to .complete()."""
+
+    def __init__(self, response='{"label":"ok","reason":"well-formed","confidence":0.5}'):
+        self._response = response
+        self.last_prompt = ""
+
+    def complete(self, messages, temperature=0.2, response_format=None):
+        self.last_prompt = messages[0]["content"]
+        return self._response
+
+
+# ---------------------------------------------------------------------------
+# Statement-vs-step prompt handling (eval-driven fix)
+# ---------------------------------------------------------------------------
+
+def test_review_prompt_treats_statement_nodes_as_premises(tmp_path):
+    """A theorem-kind node's prompt carries its kind + the statement-as-premise rule."""
+    from paper_distiller.proofs.store import Node
+    from paper_distiller.proofgraph.reviewer import review_node
+    store = _store(tmp_path)
+    nid = store.add_node(Node(paper_arxiv_id="P", kind="theorem",
+                              text="For all x, P(x).", label="Theorem 1",
+                              source_quote="For all x, P(x)."))
+    node = store.get_node(nid)
+    llm = _RecordingLLM()
+    review_node(store, node, llm)
+    p = llm.last_prompt.lower()
+    assert "theorem" in p
+    assert "premise" in p  # statement nodes judged as premises, not unsupported steps
+    store.close()
+
+
+def test_review_prompt_scrutinizes_step_nodes(tmp_path):
+    """A proof_step node's prompt still instructs 'follows from dependencies' scrutiny."""
+    from paper_distiller.proofs.store import Node
+    from paper_distiller.proofgraph.reviewer import review_node
+    store = _store(tmp_path)
+    nid = store.add_node(Node(paper_arxiv_id="P", kind="proof_step",
+                              text="By Holder, A<=B.", source_quote="By Holder, A<=B."))
+    node = store.get_node(nid)
+    llm = _RecordingLLM()
+    review_node(store, node, llm)
+    p = llm.last_prompt.lower()
+    assert "proof_step" in p
+    assert "follow" in p  # steps must follow from parents/technique
+    store.close()
+
+
 # ---------------------------------------------------------------------------
 # Task 6.1 — review_node
 # ---------------------------------------------------------------------------

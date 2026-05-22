@@ -114,6 +114,7 @@ def review_node(store: "ProofStore", node: "Node", llm) -> ReviewResult:
         template = _load_prompt()
         prompt = (
             template
+            .replace("{kind}", node.kind)
             .replace("{label}", node.label or "(unlabeled)")
             .replace("{text}", node.text)
             .replace("{source_quote}", node.source_quote or "(no quote)")
