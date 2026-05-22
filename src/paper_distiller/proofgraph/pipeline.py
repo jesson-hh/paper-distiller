@@ -22,12 +22,34 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 
 from ..proofs.store import Edge, Node, ProofStore
 from .extractor import extract_segment, self_check
 from .memory import RunningMemory
 from .reader import segment
+
+# ---------------------------------------------------------------------------
+# Helper: distinguish named mathematical results from informal references
+# ---------------------------------------------------------------------------
+
+_NAMED_RESULT_RE = re.compile(
+    r"^(theorem|lemma|proposition|corollary|claim|definition|def|"
+    r"assumption|axiom|eq|equation)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_named_result(target: str) -> bool:
+    """Return True iff *target* looks like a named mathematical result.
+
+    A named result starts (case-insensitively) with one of the standard
+    keywords (theorem, lemma, proposition, …) optionally followed by a
+    number/letter.  Informal references such as "the previous bound" or
+    "this step" return False.
+    """
+    return bool(_NAMED_RESULT_RE.match(target.strip()))
 
 
 @dataclass
@@ -73,8 +95,11 @@ def build_graph_for_paper(
     # Step 3: per-segment loop
     memory = RunningMemory()
     label_to_id: dict[str, int] = {}
-    # pending: list of (node_id, refs_list)
-    pending: list[tuple[int, list]] = []
+    # pending: list of (node_id, refs_list, local_key_to_id)
+    # local_key_to_id maps the short per-segment keys emitted by the LLM (e.g.
+    # "n1", "n2") to the store node id, allowing intra-proof step refs to
+    # resolve without a formal label.
+    pending: list[tuple[int, list, dict[str, int]]] = []
     nodes_by_kind: dict[str, int] = {}
     rejected_quotes = 0
     segments_processed = 0
@@ -84,6 +109,10 @@ def build_graph_for_paper(
         accepted, n_rejected = extract_segment(seg, memory, llm, depth=depth)
         rejected_quotes += n_rejected
         accepted = self_check(seg, accepted, llm)
+
+        # Build local-key map for THIS segment before writing to store
+        # (we need to map key → nid after add_node; collect keys first)
+        local_key_to_id: dict[str, int] = {}
 
         # Write each accepted node to the store
         for node in accepted:
@@ -103,11 +132,14 @@ def build_graph_for_paper(
                 techniques=list(node.techniques or []),
             )
             nid = store.add_node(store_node)
-            # Track label → node id for edge resolution
+            # Track label → node id for global edge resolution
             if node.label:
                 label_to_id[node.label] = nid
+            # Track local key → node id for intra-segment edge resolution
+            if node.key:
+                local_key_to_id[node.key] = nid
             # Accumulate pending refs for edge resolution pass
-            pending.append((nid, list(node.refs or [])))
+            pending.append((nid, list(node.refs or []), local_key_to_id))
             # Tally by kind
             nodes_by_kind[node.kind] = nodes_by_kind.get(node.kind, 0) + 1
 
@@ -121,10 +153,14 @@ def build_graph_for_paper(
     gap_node_ids: set[int] = set()
     obligations: list[str] = []
 
-    for nid, refs in pending:
+    for nid, refs, local_key_to_id in pending:
         for ref in refs:
-            target_id = label_to_id.get(ref.target)
-            if target_id is not None:
+            # Resolution order: local key first (intra-proof step), then global label
+            target_id = local_key_to_id.get(ref.target)
+            if target_id is None:
+                target_id = label_to_id.get(ref.target)
+
+            if target_id is not None and target_id != nid:
                 # Resolvable → create edge
                 edge = Edge(src_id=nid, dst_id=target_id, rel=ref.rel)
                 try:
@@ -132,11 +168,18 @@ def build_graph_for_paper(
                 except Exception:
                     pass  # UNIQUE constraint if duplicate — safe to ignore
             else:
-                # Unresolvable → mark as gap (once per node)
-                if nid not in gap_node_ids:
-                    store.set_node_status(nid, "gap")
-                    gap_node_ids.add(nid)
-                    gaps += 1
+                # Unresolvable — distinguish named results from informal refs
+                if _looks_like_named_result(ref.target):
+                    # Named result (Lemma N, Theorem K, …) → real gap
+                    if nid not in gap_node_ids:
+                        store.set_node_status(nid, "gap")
+                        gap_node_ids.add(nid)
+                        gaps += 1
+                else:
+                    # Informal reference ("the previous bound", etc.) → soft dependency
+                    # Do NOT mark as gap; just surface in obligations for visibility
+                    pass
+                # Always record the unresolved target in obligations
                 if ref.target not in obligations:
                     obligations.append(ref.target)
 

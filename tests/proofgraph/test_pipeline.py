@@ -303,3 +303,168 @@ def test_build_graph_two_dangling_refs_count_one_gap(tmp_path):
     assert step is not None, f"Step 1 not found; labels={[n.label for n in nodes]}"
     assert step.status == "gap", f"Expected 'gap' but got '{step.status}'"
     assert report.gaps == 1, f"Expected gaps=1 but got {report.gaps}"
+
+
+# ---------------------------------------------------------------------------
+# Fix 1: intra-segment local-key resolution
+# ---------------------------------------------------------------------------
+
+class _LocalKeyLLM:
+    """Two proof_step nodes in the SAME proof segment.
+    Step2's ref targets "n1" (the key of Step1) — no label used.
+    """
+    STEP1_QUOTE = "By Bernstein's inequality we bound the tail probability directly."
+    STEP2_QUOTE = "This follows immediately from the bound."
+
+    def __init__(self):
+        self.call_count = 0
+        self._proof_resp = json.dumps({"nodes": [
+            {
+                "kind": "proof_step",
+                "key": "n1",
+                "text": "Step 1 content",
+                "source_quote": self.STEP1_QUOTE,
+                "techniques": [],
+                "refs": [],
+            },
+            {
+                "kind": "proof_step",
+                "key": "n2",
+                "text": "Step 2 content",
+                "source_quote": self.STEP2_QUOTE,
+                "techniques": [],
+                "refs": [{"rel": "depends_on", "target": "n1"}],
+            },
+        ]})
+        self._no_suspicious = json.dumps({"suspicious_labels": []})
+        self._empty = json.dumps({"nodes": []})
+
+    def complete(self, messages, temperature=0.2, response_format=None):
+        self.call_count += 1
+        content = messages[0]["content"] if messages else ""
+        if content.startswith("You are reviewing extracted mathematical"):
+            return self._no_suspicious
+        if self.STEP1_QUOTE in content and self.STEP2_QUOTE in content:
+            return self._proof_resp
+        return self._empty
+
+
+def test_local_key_ref_creates_edge(tmp_path):
+    """Intra-segment: step2 refs step1 by local key 'n1' → depends_on edge is created,
+    neither node is marked gap."""
+    from paper_distiller.proofs.store import ProofStore
+    from paper_distiller.proofgraph.pipeline import build_graph_for_paper
+    store = ProofStore(tmp_path / "proofs.db")
+    llm = _LocalKeyLLM()
+    report = build_graph_for_paper(store, "K.1", FAKE_PAPER, paper_slug="fp", llm=llm)
+
+    nodes = store.nodes_by_paper("K.1")
+    # Find the two steps by their text
+    step1 = next((n for n in nodes if n.text == "Step 1 content"), None)
+    step2 = next((n for n in nodes if n.text == "Step 2 content"), None)
+    assert step1 is not None, f"Step1 not found; nodes={[(n.text, n.label) for n in nodes]}"
+    assert step2 is not None, f"Step2 not found; nodes={[(n.text, n.label) for n in nodes]}"
+
+    # The depends_on edge from step2 → step1 must exist
+    edges = store.out_edges(step2.id, rel="depends_on")
+    assert any(e.dst_id == step1.id for e in edges), (
+        f"No depends_on edge from step2 to step1; edges={edges}"
+    )
+    # Neither node should be marked gap
+    assert step1.status != "gap", f"step1 unexpectedly marked gap"
+    assert step2.status != "gap", f"step2 unexpectedly marked gap"
+    assert report.gaps == 0, f"Expected gaps=0 but got {report.gaps}"
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: named vs informal unresolved refs
+# ---------------------------------------------------------------------------
+
+class _InformalRefLLM:
+    """One proof_step with an informal (non-named-result) dangling ref."""
+    STEP_QUOTE = "By Bernstein's inequality we bound the tail probability directly."
+
+    def __init__(self):
+        self.call_count = 0
+        self._proof_resp = json.dumps({"nodes": [{
+            "kind": "proof_step",
+            "label": "Step X",
+            "text": "Uses the previous bound",
+            "source_quote": self.STEP_QUOTE,
+            "techniques": [],
+            "refs": [{"rel": "depends_on", "target": "the previous bound"}],
+        }]})
+        self._no_suspicious = json.dumps({"suspicious_labels": []})
+        self._empty = json.dumps({"nodes": []})
+
+    def complete(self, messages, temperature=0.2, response_format=None):
+        self.call_count += 1
+        content = messages[0]["content"] if messages else ""
+        if content.startswith("You are reviewing extracted mathematical"):
+            return self._no_suspicious
+        if self.STEP_QUOTE in content:
+            return self._proof_resp
+        return self._empty
+
+
+def test_informal_unresolved_ref_no_gap(tmp_path):
+    """An unresolved ref to an informal target ('the previous bound') must NOT
+    mark the node gap and must NOT increment report.gaps.
+    The target string must appear in report.obligations."""
+    from paper_distiller.proofs.store import ProofStore
+    from paper_distiller.proofgraph.pipeline import build_graph_for_paper
+    store = ProofStore(tmp_path / "proofs.db")
+    llm = _InformalRefLLM()
+    report = build_graph_for_paper(store, "I.1", FAKE_PAPER, paper_slug="fp", llm=llm)
+
+    nodes = store.nodes_by_paper("I.1")
+    step = next((n for n in nodes if n.label == "Step X"), None)
+    assert step is not None, f"Step X not found; nodes={[n.label for n in nodes]}"
+    assert step.status != "gap", f"Expected NOT gap but got gap"
+    assert report.gaps == 0, f"Expected gaps=0 but got {report.gaps}"
+    assert "the previous bound" in report.obligations, (
+        f"Expected 'the previous bound' in obligations; got {report.obligations}"
+    )
+
+
+class _NamedUnresolvedLLM:
+    """One proof_step with a named-result dangling ref ('Lemma 99')."""
+    STEP_QUOTE = "By Bernstein's inequality we bound the tail probability directly."
+
+    def __init__(self):
+        self.call_count = 0
+        self._proof_resp = json.dumps({"nodes": [{
+            "kind": "proof_step",
+            "label": "Step Y",
+            "text": "Uses Lemma 99",
+            "source_quote": self.STEP_QUOTE,
+            "techniques": [],
+            "refs": [{"rel": "uses_lemma", "target": "Lemma 99"}],
+        }]})
+        self._no_suspicious = json.dumps({"suspicious_labels": []})
+        self._empty = json.dumps({"nodes": []})
+
+    def complete(self, messages, temperature=0.2, response_format=None):
+        self.call_count += 1
+        content = messages[0]["content"] if messages else ""
+        if content.startswith("You are reviewing extracted mathematical"):
+            return self._no_suspicious
+        if self.STEP_QUOTE in content:
+            return self._proof_resp
+        return self._empty
+
+
+def test_named_unresolved_ref_becomes_gap(tmp_path):
+    """An unresolved ref to a named result ('Lemma 99') MUST mark the node gap
+    and increment report.gaps."""
+    from paper_distiller.proofs.store import ProofStore
+    from paper_distiller.proofgraph.pipeline import build_graph_for_paper
+    store = ProofStore(tmp_path / "proofs.db")
+    llm = _NamedUnresolvedLLM()
+    report = build_graph_for_paper(store, "N.1", FAKE_PAPER, paper_slug="fp", llm=llm)
+
+    nodes = store.nodes_by_paper("N.1")
+    step = next((n for n in nodes if n.label == "Step Y"), None)
+    assert step is not None, f"Step Y not found; nodes={[n.label for n in nodes]}"
+    assert step.status == "gap", f"Expected gap but got '{step.status}'"
+    assert report.gaps >= 1, f"Expected gaps>=1 but got {report.gaps}"
