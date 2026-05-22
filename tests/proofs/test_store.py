@@ -354,3 +354,18 @@ def test_delete_paper_graph(tmp_path):
     assert store._conn.execute(
         "SELECT COUNT(*) FROM node_techniques").fetchone()[0] == 0
     store.close()
+
+
+def test_theorem_layer_unchanged_after_graph_migration(tmp_path):
+    """Existing theorem ingestion + queries still work identically with v2 schema."""
+    from paper_distiller.proofs.store import ProofStore
+    store = ProofStore(tmp_path / "proofs.db")
+    store.ingest_sidecar(_sample_sidecar(), "2110.12319", paper_slug="bigan-bounds")
+    assert store.theorem_count() == 2
+    assert store.technique_count() == 5
+    assert store.paper_count() == 1
+    assert len(store.theorems_using_technique("Hölder")) == 1
+    assert len(store.search_theorems("Bernstein")) >= 1
+    assert len(store.theorems_by_paper("2110.12319")) == 2
+    assert "Hölder" in store.list_canonical_technique_names()
+    store.close()
