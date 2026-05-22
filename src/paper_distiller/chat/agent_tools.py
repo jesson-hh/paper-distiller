@@ -40,6 +40,8 @@ from ..vault.store import VaultStore
 from ._durations import parse_duration as _parse_duration
 from .qa_runner import run_qa_loop
 from .research_runner import run_research_loop
+from ..proofs.store import open_for_vault
+from ..proofgraph.reviewer import review_target
 
 
 __all__ = [
@@ -53,6 +55,7 @@ __all__ = [
     "tool_research",
     "tool_ask_user",
     "tool_find_proof",
+    "tool_review_proof",
 ]
 
 
@@ -398,6 +401,41 @@ _ASK_USER_SCHEMA = {
 }
 
 
+_REVIEW_PROOF_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "review_proof",
+        "description": (
+            "Structured review of a distilled proof: walks the proof graph, "
+            "flags suspicious steps / logic gaps with grounded reasons + error "
+            "propagation. LOCATES issues; does not certify correctness. Needs "
+            "papers already distilled with PD_GRAPH_DEPTH set."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "target_type": {
+                    "type": "string",
+                    "enum": ["paper", "node"],
+                    "description": (
+                        "What to review: 'paper' = all nodes for an arxiv_id; "
+                        "'node' = a specific node id and its dependency subtree."
+                    ),
+                },
+                "target": {
+                    "type": "string",
+                    "description": (
+                        "arxiv_id (for target_type='paper') or integer node id "
+                        "(for target_type='node')."
+                    ),
+                },
+            },
+            "required": ["target_type", "target"],
+        },
+    },
+}
+
+
 TOOL_SCHEMAS: list = [
     _SEARCH_SCHEMA,
     _DISTILL_BY_ID_SCHEMA,
@@ -406,6 +444,7 @@ TOOL_SCHEMAS: list = [
     _RESEARCH_SCHEMA,
     _ASK_USER_SCHEMA,
     _FIND_PROOF_SCHEMA,
+    _REVIEW_PROOF_SCHEMA,
 ]
 
 
@@ -932,6 +971,60 @@ def tool_find_proof(
         return _error(e)
 
 
+def tool_review_proof(
+    target_type: str,
+    target: str,
+    *,
+    vault_path: str,
+) -> dict:
+    """Structured review of a distilled proof graph.
+
+    Walks the proof graph for the given paper or node, labels each node
+    (ok/suspicious/gap/unsupported/unstated), propagates error taint to
+    descendants, persists statuses, and returns a prioritised report.
+
+    Returns a JSON-serializable dict. Never raises — returns {'error': ...}
+    on bad input, missing env, or store issues.
+    """
+    import dataclasses
+    import os
+    from pathlib import Path
+
+    try:
+        if target_type not in {"paper", "node"}:
+            return {"error": f"unknown target_type: {target_type!r}. Use 'paper' or 'node'."}
+
+        api_key = os.getenv("PD_API_KEY")
+        base_url = os.getenv("PD_BASE_URL")
+        model = os.getenv("PD_MODEL")
+        if not api_key or not base_url or not model:
+            return {"error": "LLM env not set: PD_API_KEY / PD_BASE_URL / PD_MODEL required"}
+
+        llm = LLMClient(api_key=api_key, base_url=base_url, model=model)
+
+        store = open_for_vault(Path(vault_path))
+        try:
+            kwargs = {}
+            if target_type == "paper":
+                kwargs["paper_arxiv_id"] = target
+            else:
+                kwargs["node_id"] = int(target)
+
+            report = review_target(store, llm=llm, **kwargs)
+        finally:
+            store.close()
+
+        return {
+            "target": report.target,
+            "nodes_reviewed": report.nodes_reviewed,
+            "by_label": report.by_label,
+            "flagged": [dataclasses.asdict(r) for r in report.flagged],
+            "summary": report.summary,
+        }
+    except Exception as e:
+        return _error(e)
+
+
 TOOL_FUNCTIONS: dict[str, Callable] = {
     "search": tool_search,
     "distill_by_id": tool_distill_by_id,
@@ -940,6 +1033,7 @@ TOOL_FUNCTIONS: dict[str, Callable] = {
     "research": tool_research,
     "ask_user": tool_ask_user,
     "find_proof": tool_find_proof,
+    "review_proof": tool_review_proof,
 }
 
 

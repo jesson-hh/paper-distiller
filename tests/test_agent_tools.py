@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 def test_tool_schemas_valid():
     from paper_distiller.chat.agent_tools import TOOL_SCHEMAS
 
-    assert len(TOOL_SCHEMAS) == 7
+    assert len(TOOL_SCHEMAS) == 8
     for schema in TOOL_SCHEMAS:
         assert schema["type"] == "function"
         fn = schema["function"]
@@ -30,7 +30,7 @@ def test_tool_schemas_distinct_names():
     names = [s["function"]["name"] for s in TOOL_SCHEMAS]
     assert set(names) == {
         "search", "distill_by_id", "show", "ask", "research",
-        "ask_user", "find_proof",
+        "ask_user", "find_proof", "review_proof",
     }
     assert len(names) == len(set(names))  # no duplicates
 
@@ -41,7 +41,7 @@ def test_tool_schemas_order_matches_spec():
     names_in_order = [s["function"]["name"] for s in TOOL_SCHEMAS]
     assert names_in_order == [
         "search", "distill_by_id", "show", "ask", "research",
-        "ask_user", "find_proof",
+        "ask_user", "find_proof", "review_proof",
     ]
 
 
@@ -656,3 +656,97 @@ def test_ask_user_in_execute_tool_dispatch(mocker, tmp_path):
         vault_path=str(tmp_path),
     )
     assert result["selected"] == ["A"]
+
+
+# ---------------------------------------------------------------------------
+# tool_review_proof (Task 6.4 — 8th tool)
+# ---------------------------------------------------------------------------
+
+def _make_stub_report():
+    """Build a minimal ReviewReport for monkeypatching."""
+    from paper_distiller.proofgraph.reviewer import ReviewReport, ReviewResult
+    return ReviewReport(
+        target="2110.1",
+        nodes_reviewed=2,
+        by_label={"ok": 1, "suspicious": 1},
+        flagged=[
+            ReviewResult(node_id=1, label="suspicious", reason="bad step", confidence=0.5),
+        ],
+        summary="1 of 2 nodes need attention",
+    )
+
+
+def test_tool_review_proof_paper_mode(monkeypatch, tmp_path):
+    """tool_review_proof monkeypatches review_target; checks returned dict shape."""
+    import paper_distiller.chat.agent_tools as at
+
+    stub_report = _make_stub_report()
+    monkeypatch.setattr(at, "review_target", lambda *a, **kw: stub_report)
+    # Also monkeypatch open_for_vault to avoid needing a real store
+    from paper_distiller.proofs.store import ProofStore
+    fake_store = ProofStore(tmp_path / "proofs.db")
+    monkeypatch.setattr(at, "open_for_vault", lambda p: fake_store)
+    # Provide env vars so LLMClient doesn't raise
+    monkeypatch.setenv("PD_API_KEY", "test-key")
+    monkeypatch.setenv("PD_BASE_URL", "http://localhost")
+    monkeypatch.setenv("PD_MODEL", "test-model")
+
+    from paper_distiller.chat.agent_tools import tool_review_proof
+    result = tool_review_proof(
+        target_type="paper", target="2110.1", vault_path=str(tmp_path)
+    )
+
+    assert "target" in result
+    assert "nodes_reviewed" in result
+    assert "by_label" in result
+    assert "flagged" in result
+    assert "summary" in result
+    # flagged must be a list of dicts (JSON-serializable), not ReviewResult objects
+    assert isinstance(result["flagged"], list)
+    if result["flagged"]:
+        assert isinstance(result["flagged"][0], dict)
+
+
+def test_tool_review_proof_bad_target_type_returns_error(monkeypatch, tmp_path):
+    """Unknown target_type must return {'error': ...}."""
+    monkeypatch.setenv("PD_API_KEY", "test-key")
+    monkeypatch.setenv("PD_BASE_URL", "http://localhost")
+    monkeypatch.setenv("PD_MODEL", "test-model")
+
+    from paper_distiller.chat.agent_tools import tool_review_proof
+    result = tool_review_proof(
+        target_type="galaxy", target="2110.1", vault_path=str(tmp_path)
+    )
+    assert "error" in result
+
+
+def test_tool_review_proof_missing_env_returns_error(monkeypatch, tmp_path):
+    """Missing PD_API_KEY returns {'error': ...} without crashing."""
+    monkeypatch.delenv("PD_API_KEY", raising=False)
+    monkeypatch.delenv("PD_BASE_URL", raising=False)
+    monkeypatch.delenv("PD_MODEL", raising=False)
+
+    from paper_distiller.chat.agent_tools import tool_review_proof
+    result = tool_review_proof(
+        target_type="paper", target="2110.1", vault_path=str(tmp_path)
+    )
+    assert "error" in result
+
+
+def test_review_proof_in_tool_schemas():
+    """review_proof must appear in TOOL_SCHEMAS."""
+    from paper_distiller.chat.agent_tools import TOOL_SCHEMAS
+    names = [s["function"]["name"] for s in TOOL_SCHEMAS]
+    assert "review_proof" in names
+
+
+def test_review_proof_in_tool_functions():
+    """review_proof must be in TOOL_FUNCTIONS."""
+    from paper_distiller.chat.agent_tools import TOOL_FUNCTIONS
+    assert "review_proof" in TOOL_FUNCTIONS
+
+
+def test_review_proof_in_all():
+    """tool_review_proof must appear in __all__."""
+    from paper_distiller.chat import agent_tools
+    assert "tool_review_proof" in agent_tools.__all__
