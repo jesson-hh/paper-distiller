@@ -289,3 +289,17 @@ def test_add_and_get_node(tmp_path):
     by_paper = store.nodes_by_paper("2110.1")
     assert [n.id for n in by_paper] == [nid]
     store.close()
+
+
+def test_add_edge_idempotent_and_query(tmp_path):
+    from paper_distiller.proofs.store import ProofStore, Node, Edge
+    store = ProofStore(tmp_path / "proofs.db")
+    a = store.add_node(Node(paper_arxiv_id="p", kind="proof_step", text="step a"))
+    b = store.add_node(Node(paper_arxiv_id="p", kind="assumption", text="A2"))
+    store.add_edge(Edge(src_id=a, dst_id=b, rel="uses_assumption"))
+    store.add_edge(Edge(src_id=a, dst_id=b, rel="uses_assumption"))  # dup
+    out = store.out_edges(a)
+    assert len(out) == 1  # UNIQUE(src,dst,rel) collapses the dup
+    assert out[0].dst_id == b and out[0].rel == "uses_assumption"
+    assert [e.src_id for e in store.in_edges(b)] == [a]
+    store.close()

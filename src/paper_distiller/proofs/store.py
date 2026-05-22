@@ -65,6 +65,18 @@ class Node:
 
 
 @dataclass
+class Edge:
+    """A typed dependency edge: src --rel--> dst means 'src depends on / uses dst'."""
+    src_id: int
+    dst_id: int
+    rel: str
+    justification: str | None = None
+    cross_paper: int = 0
+    id: int | None = None
+    created_at: str | None = None
+
+
+@dataclass
 class Technique:
     """Canonical name for a math technique / inequality / framework."""
     name: str  # canonical short form, e.g. "Hölder"
@@ -314,6 +326,47 @@ class ProofStore:
             "SELECT * FROM nodes WHERE paper_arxiv_id=? ORDER BY id",
             (paper_arxiv_id,)).fetchall()
         return [self._row_to_node(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Graph edge CRUD
+    # ------------------------------------------------------------------
+
+    def add_edge(self, edge: Edge) -> None:
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        self._conn.execute(
+            "INSERT OR IGNORE INTO edges(src_id, dst_id, rel, justification, "
+            "cross_paper, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (edge.src_id, edge.dst_id, edge.rel, edge.justification,
+             int(edge.cross_paper), now),
+        )
+        self._conn.commit()
+
+    def _row_to_edge(self, row) -> Edge:
+        return Edge(
+            id=row["id"], src_id=row["src_id"], dst_id=row["dst_id"], rel=row["rel"],
+            justification=row["justification"], cross_paper=row["cross_paper"],
+            created_at=row["created_at"],
+        )
+
+    def out_edges(self, node_id: int, rel: str | None = None) -> list[Edge]:
+        if rel is None:
+            rows = self._conn.execute(
+                "SELECT * FROM edges WHERE src_id=? ORDER BY id", (node_id,)).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM edges WHERE src_id=? AND rel=? ORDER BY id",
+                (node_id, rel)).fetchall()
+        return [self._row_to_edge(r) for r in rows]
+
+    def in_edges(self, node_id: int, rel: str | None = None) -> list[Edge]:
+        if rel is None:
+            rows = self._conn.execute(
+                "SELECT * FROM edges WHERE dst_id=? ORDER BY id", (node_id,)).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM edges WHERE dst_id=? AND rel=? ORDER BY id",
+                (node_id, rel)).fetchall()
+        return [self._row_to_edge(r) for r in rows]
 
     # ------------------------------------------------------------------
     # Ingestion
