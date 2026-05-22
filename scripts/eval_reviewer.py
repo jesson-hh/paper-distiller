@@ -25,11 +25,8 @@ gold_label ∈ {"ok", "problem"}.
 """
 from __future__ import annotations
 
-import json
 import os
 import sys
-from dataclasses import dataclass
-from pathlib import Path
 from typing import NamedTuple
 
 
@@ -163,7 +160,7 @@ def run_eval() -> None:
         sys.exit(1)
 
     from paper_distiller.llm.openai_compatible import LLMClient
-    from paper_distiller.proofs.store import ProofStore, Node, Edge
+    from paper_distiller.proofs.store import ProofStore, Node
     from paper_distiller.proofgraph.reviewer import review_node
 
     llm = LLMClient(api_key=api_key, base_url=base_url, model=model)
