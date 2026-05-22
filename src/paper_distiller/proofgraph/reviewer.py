@@ -209,3 +209,73 @@ def compute_taint(
             taint[nid] = sorted(problem_ancestors)
 
     return taint
+
+
+# ---------------------------------------------------------------------------
+# Task 6.3: review_target
+# ---------------------------------------------------------------------------
+
+def review_target(
+    store: "ProofStore",
+    *,
+    paper_arxiv_id: str | None = None,
+    node_id: int | None = None,
+    llm,
+) -> ReviewReport:
+    """Orchestrate review of a paper or subtree.
+
+    Walks nodes, calls review_node for each, persists statuses, propagates
+    taint, and returns a ReviewReport.
+    """
+    if paper_arxiv_id is not None:
+        nodes = store.nodes_by_paper(paper_arxiv_id)
+        target_str = paper_arxiv_id
+    elif node_id is not None:
+        root = store.get_node(node_id)
+        if root is None:
+            nodes = []
+        else:
+            nodes = [root] + store.dependency_walk(node_id)
+        target_str = f"node:{node_id}"
+    else:
+        raise ValueError("review_target requires paper_arxiv_id or node_id")
+
+    # Review each node and persist status
+    results: list[ReviewResult] = []
+    label_by_id: dict[int, str] = {}
+
+    for node in nodes:
+        r = review_node(store, node, llm)
+        store.set_node_status(node.id, r.label)
+        results.append(r)
+        label_by_id[node.id] = r.label
+
+    # Compute taint and attach to results
+    reviewed_ids = [n.id for n in nodes]
+    taint = compute_taint(store, reviewed_ids, label_by_id)
+    for r in results:
+        r.tainted_by = taint.get(r.node_id, [])
+
+    # Build flagged list: own problems first, then tainted-only
+    own_problems = [r for r in results if r.label in PROBLEM]
+    tainted_only = [
+        r for r in results
+        if r.label not in PROBLEM and r.tainted_by
+    ]
+    flagged = own_problems + tainted_only
+
+    # Count labels
+    from collections import Counter
+    by_label = dict(Counter(r.label for r in results))
+
+    n_flagged = len(flagged)
+    n_total = len(nodes)
+    summary = f"{n_flagged} of {n_total} nodes need attention"
+
+    return ReviewReport(
+        target=target_str,
+        nodes_reviewed=n_total,
+        by_label=by_label,
+        flagged=flagged,
+        summary=summary,
+    )
