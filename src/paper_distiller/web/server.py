@@ -24,12 +24,25 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 
 def _inject_vault_meta(html: str, vault_path: str) -> str:
-    """Insert <meta name="vault-path" content="..."> after <head>."""
+    """Insert <meta name="vault-path" content="..."> and rewrite static refs.
+
+    The static files are served at /static/; rewrite relative refs so the
+    browser finds them when the HTML is served at /.
+    """
     tag = f'<meta name="vault-path" content="{vault_path}">'
     if "<head>" in html:
-        return html.replace("<head>", f"<head>\n  {tag}", 1)
-    # fallback: insert at top
-    return tag + "\n" + html
+        html = html.replace("<head>", f"<head>\n  {tag}", 1)
+    else:
+        html = tag + "\n" + html
+
+    # Rewrite relative static file references to /static/ prefix
+    html = html.replace('href="paper-distiller.css"', 'href="/static/paper-distiller.css"')
+    html = html.replace("href='paper-distiller.css'", "href='/static/paper-distiller.css'")
+    html = html.replace('src="paper-distiller.jsx"', 'src="/static/paper-distiller.jsx"')
+    html = html.replace("src='paper-distiller.jsx'", "src='/static/paper-distiller.jsx'")
+    html = html.replace('src="deck-stage.js"', 'src="/static/deck-stage.js"')
+    html = html.replace("src='deck-stage.js'", "src='/static/deck-stage.js'")
+    return html
 
 
 def create_app(vault_path: str) -> FastAPI:
