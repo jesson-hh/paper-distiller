@@ -82,6 +82,38 @@ class StubLLMTwoToolCalls:
             yield StreamChunk(finish_reason="stop")
 
 
+class StubLLMParallelTwoToolCalls:
+    """Stub that emits two parallel tool calls interleaved in ONE turn, then text.
+
+    Simulates the OpenAI streaming format for parallel tool calls where chunks
+    for both tool calls arrive interleaved by index (tc_P at index 0, tc_Q at
+    index 1) with no id on subsequent arg-delta chunks.
+    """
+    _call_count = 0
+    total_tokens_in = 100
+    total_tokens_out = 150
+
+    @property
+    def estimated_cost_cny(self):
+        return 0.10
+
+    def complete_with_tools_stream(self, messages, tools, temperature=0.5):
+        self._call_count += 1
+        if self._call_count == 1:
+            # First chunk for tool call 0 (carries id + partial name + partial args)
+            yield StreamChunk(tool_call_id="tc_P", tool_name_delta="search", tool_arg_delta="")
+            # Arg delta for tool call 0 (no id → appends to current_idx = 0)
+            yield StreamChunk(tool_arg_delta='{"topic":"parallel_x"}')
+            # First chunk for tool call 1 (new id → current_idx becomes 1)
+            yield StreamChunk(tool_call_id="tc_Q", tool_name_delta="search", tool_arg_delta="")
+            # Arg delta for tool call 1 (no id → appends to current_idx = 1)
+            yield StreamChunk(tool_arg_delta='{"topic":"parallel_y"}')
+            yield StreamChunk(finish_reason="tool_calls")
+        else:
+            yield StreamChunk(text_delta="Both done.")
+            yield StreamChunk(finish_reason="stop")
+
+
 # ── Canned execute_tool result ────────────────────────────────────────────────
 
 _CANNED_SEARCH_RESULT = {"candidates": [{"id": "1234.5678", "title": "Test Paper", "authors": [], "year": "2023", "abstract": "...", "pdf_url": ""}]}
@@ -249,6 +281,43 @@ class TestAgentEventStreamError:
         types = [e["type"] for e in events]
         assert "error" in types
         assert "done" in types
+
+
+# ── I4: parallel tool-call accumulation ──────────────────────────────────────
+
+
+class TestParallelToolCallAccumulation:
+    """I4 — two parallel tool calls interleaved in one turn must each get their
+    own args intact (not corrupted by max() index logic)."""
+
+    @pytest.mark.asyncio
+    async def test_two_parallel_tool_calls_args_intact(self):
+        llm = StubLLMParallelTwoToolCalls()
+        with patch("paper_distiller.web.agent_stream.execute_tool", _mock_execute_tool):
+            events = await _collect_events(
+                agent_event_stream("run both", [], "/tmp/vault", llm)
+            )
+
+        starts = [e for e in events if e["type"] == "tool_call_start"]
+        assert len(starts) == 2, f"expected 2 tool_call_start events, got {starts}"
+
+        # Each tool call must have its own distinct args
+        args_by_id = {e["id"]: e["args"] for e in starts}
+        assert args_by_id["tc_P"] == {"topic": "parallel_x"}, f"tc_P args wrong: {args_by_id['tc_P']}"
+        assert args_by_id["tc_Q"] == {"topic": "parallel_y"}, f"tc_Q args wrong: {args_by_id['tc_Q']}"
+
+    @pytest.mark.asyncio
+    async def test_two_parallel_tool_calls_done_events(self):
+        llm = StubLLMParallelTwoToolCalls()
+        with patch("paper_distiller.web.agent_stream.execute_tool", _mock_execute_tool):
+            events = await _collect_events(
+                agent_event_stream("run both", [], "/tmp/vault", llm)
+            )
+
+        dones = [e for e in events if e["type"] == "tool_call_done"]
+        assert len(dones) == 2
+        done_ids = {e["id"] for e in dones}
+        assert done_ids == {"tc_P", "tc_Q"}
 
 
 # ── Tests: POST /chat/stream endpoint ────────────────────────────────────────

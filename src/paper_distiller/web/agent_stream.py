@@ -17,8 +17,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, AsyncIterator
+from typing import Any, AsyncGenerator
 
+from .._pricing_helper import estimate_cost_event
 from ..chat.agent_tools import TOOL_SCHEMAS, execute_tool
 from ..llm.openai_compatible import LLMClient, StreamChunk
 
@@ -30,7 +31,7 @@ async def agent_event_stream(
     history: list[dict],
     vault_path: str,
     llm: LLMClient,
-) -> AsyncIterator[dict]:
+) -> AsyncGenerator[dict, None]:
     """Drive the LLM agent loop and yield SSE event dicts.
 
     Parameters
@@ -54,6 +55,7 @@ async def agent_event_stream(
             # 2. Stream LLM response in a thread (blocking httpx call)
             text_buf = ""
             tool_calls_acc: dict[int, dict] = {}  # idx -> {id, name, args_str}
+            current_idx: int = -1  # index of the tool call currently accumulating
 
             def _stream_llm():
                 return list(llm.complete_with_tools_stream(working, TOOL_SCHEMAS))
@@ -66,25 +68,21 @@ async def agent_event_stream(
                     yield {"type": "text", "delta": chunk.text_delta}
 
                 if chunk.tool_call_id or chunk.tool_name_delta or chunk.tool_arg_delta:
-                    # Accumulate tool call fragments
-                    # We need to track which index this belongs to.
-                    # The first time we see a new tool_call_id, we start a new entry.
+                    # Accumulate tool call fragments by index.
+                    # A chunk carrying tool_call_id starts a new entry; subsequent
+                    # name/arg deltas without an id append to current_idx.
                     if chunk.tool_call_id:
-                        # Find the idx: we assign sequentially as new IDs appear
-                        idx = len(tool_calls_acc)
-                        tool_calls_acc[idx] = {
+                        current_idx = len(tool_calls_acc)
+                        tool_calls_acc[current_idx] = {
                             "id": chunk.tool_call_id,
-                            "name": chunk.tool_name_delta,
-                            "args_str": chunk.tool_arg_delta,
+                            "name": chunk.tool_name_delta or "",
+                            "args_str": chunk.tool_arg_delta or "",
                         }
-                    else:
-                        # Append to the last active call
-                        if tool_calls_acc:
-                            last = max(tool_calls_acc)
-                            if chunk.tool_name_delta:
-                                tool_calls_acc[last]["name"] += chunk.tool_name_delta
-                            if chunk.tool_arg_delta:
-                                tool_calls_acc[last]["args_str"] += chunk.tool_arg_delta
+                    elif current_idx >= 0:
+                        if chunk.tool_name_delta:
+                            tool_calls_acc[current_idx]["name"] += chunk.tool_name_delta
+                        if chunk.tool_arg_delta:
+                            tool_calls_acc[current_idx]["args_str"] += chunk.tool_arg_delta
 
             # 3. Parse accumulated tool calls
             tool_calls: list[dict] = []
@@ -100,7 +98,6 @@ async def agent_event_stream(
                 # Append assistant message to history
                 working.append({"role": "assistant", "content": text_buf})
                 # Emit cost
-                from .._pricing_helper import estimate_cost_event  # noqa: PLC0415
                 try:
                     cost_event = estimate_cost_event(llm)
                 except Exception:
