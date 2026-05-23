@@ -313,7 +313,7 @@ function WelcomeView({ onPick, onOpenArticle }) {
       <div className="recent-list">
         {recent.length === 0 && <div style={{ color: "var(--ink-3)", fontSize: 13 }}>暂无最近文章 — 先蒸馏几篇试试</div>}
         {recent.map((r, i) => (
-          <div key={i} className="recent-item" onClick={() => onOpenArticle && onOpenArticle(r.slug, r.category)}>
+          <div key={i} className="recent-item" onClick={() => onOpenArticle && onOpenArticle(r.slug, r.category, r.arxiv_id)}>
             <span className="recent-title">{r.title}</span>
             <span className="recent-meta">{r.arxiv_id}{r.updated ? " · " + r.updated.slice(0, 10) : ""}</span>
           </div>
@@ -332,7 +332,7 @@ function _findPageRef(text) {
   return m ? parseInt(m[1], 10) : null;
 }
 
-function ArticleView({ slug, category, articleFlash, onOpenGraph, onOpenPaper, jumpToPaperPage }) {
+function ArticleView({ slug, category, articleFlash, onOpenGraph, onOpenPaper, jumpToPaperPage, onArticleLoaded }) {
   const [article, setArticle] = useState(null);
   const [error, setError] = useState(null);
 
@@ -341,7 +341,7 @@ function ArticleView({ slug, category, articleFlash, onOpenGraph, onOpenPaper, j
     setArticle(null);
     setError(null);
     apiFetch(`/vault/article/${category || "articles"}/${slug}`)
-      .then(setArticle)
+      .then(data => { setArticle(data); onArticleLoaded && onArticleLoaded(data); })
       .catch(e => setError(String(e)));
   }, [slug, category]);
 
@@ -1270,7 +1270,7 @@ function App() {
             {tab === "welcome" && (
               <WelcomeView
                 onPick={() => openArticleOpen && setTab("article")}
-                onOpenArticle={(slug, cat) => openArticle(slug, cat)}
+                onOpenArticle={(slug, cat, arxivId) => openArticle(slug, cat, arxivId)}
               />
             )}
             {tab === "article" && (
@@ -1281,6 +1281,7 @@ function App() {
                 onOpenGraph={(arxivId) => openGraph(arxivId)}
                 onOpenPaper={() => setTab("paper")}
                 jumpToPaperPage={jumpToPaperPage}
+                onArticleLoaded={a => a && a.arxiv_id && setCurrentArxivId(a.arxiv_id)}
               />
             )}
             {tab === "graph" && (
